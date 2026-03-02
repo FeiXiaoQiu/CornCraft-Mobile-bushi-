@@ -1,0 +1,99 @@
+workflows:
+  unity-android-build:
+    name: CornCraft Unity Android Build
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+
+    environment:
+      android_signing:
+        - keystore_reference
+      groups:
+        - google_play
+        - unity_credentials
+      vars:
+        PACKAGE_NAME: "com.feixiaoqiu.corncraft"
+        UNITY_VERSION: "6000.3.9f1"
+        UNITY_BUILD_TARGET: "Android"
+        BUILD_OUTPUT_PATH: "./build"
+
+    scripts:
+      - name: Set Android SDK & NDK path
+        script: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
+          echo "ndk.dir=$ANDROID_NDK_HOME" >> "$CM_BUILD_DIR/local.properties"
+
+      - name: Install Unity Editor with Android module
+        script: |
+          /Applications/Unity\ Hub.app/Contents/MacOS/Unity\ Hub -- --headless install \
+          --version $UNITY_VERSION \
+          --module android \
+          --module android-sdk-ndk-tools \
+          --accept-license
+
+      - name: Activate Unity License
+        script: |
+          UNITY_PATH="/Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app/Contents/MacOS/Unity"
+          $UNITY_PATH -batchmode -nographics \
+          -username "$UNITY_EMAIL" \
+          -password "$UNITY_PASSWORD" \
+          -serial "$UNITY_SERIAL" \
+          -quit
+
+      - name: Auto Increment Google Play Build Number
+        script: |
+          LATEST_GOOGLE_PLAY_BUILD_NUMBER=$(google-play get-latest-build-number --package-name "$PACKAGE_NAME")
+          if [ -z "$LATEST_GOOGLE_PLAY_BUILD_NUMBER" ]; then
+              UPDATED_BUILD_NUMBER=$BUILD_NUMBER
+          else
+              UPDATED_BUILD_NUMBER=$(($LATEST_GOOGLE_PLAY_BUILD_NUMBER + 1))
+          fi
+          sed -i '' "s/AndroidBundleVersionCode = [0-9]*/AndroidBundleVersionCode = $UPDATED_BUILD_NUMBER/" ProjectSettings/ProjectSettings.asset
+          sed -i '' "s/AndroidVersionCode = [0-9]*/AndroidVersionCode = $UPDATED_BUILD_NUMBER/" ProjectSettings/ProjectSettings.asset
+          sed -i '' "s/bundleVersion = [0-9.]*$/bundleVersion = 1.0.$UPDATED_BUILD_NUMBER/" ProjectSettings/ProjectSettings.asset
+          echo "Updated Build Number: $UPDATED_BUILD_NUMBER"
+          echo "Package Name: $PACKAGE_NAME"
+
+      - name: Build Android Release APK/AAB
+        script: |
+          UNITY_PATH="/Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app/Contents/MacOS/Unity"
+          $UNITY_PATH -batchmode -nographics \
+          -projectPath . \
+          -buildTarget $UNITY_BUILD_TARGET \
+          -customBuildName CornCraft \
+          -customBuildPath $BUILD_OUTPUT_PATH \
+          -keystoreName "$CM_KEYSTORE_PATH" \
+          -keystorePass "$CM_KEYSTORE_PASSWORD" \
+          -keyaliasName "$CM_KEY_ALIAS" \
+          -keyaliasPass "$CM_KEY_PASSWORD" \
+          -quit
+
+      - name: Return Unity License
+        script: |
+          UNITY_PATH="/Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app/Contents/MacOS/Unity"
+          $UNITY_PATH -batchmode -nographics \
+          -returnlicense \
+          -quit
+
+    artifacts:
+      - $BUILD_OUTPUT_PATH/**/*.apk
+      - $BUILD_OUTPUT_PATH/**/*.aab
+
+    publishing:
+      email:
+        recipients:
+          - user_1@example.com
+          - user_2@example.com
+        notify:
+          success: true
+          failure: false
+      google_play:
+        credentials: $GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS
+        track: internal
+        submit_as_draft: true
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: 'main'
+          include: true
