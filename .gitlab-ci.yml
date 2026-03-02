@@ -1,0 +1,12 @@
+image: unityci/editor:ubuntu-6000.3.9f1-android-3.0.1
+stages:
+  - build
+build-android:
+  stage: build
+  script:
+    - unity-editor -batchmode -nographics -projectPath . -buildTarget Android -customBuildName CornCraft -customBuildPath ./build/ -quit
+  artifacts:
+    paths:
+      - ./build/
+  only:
+    - main
