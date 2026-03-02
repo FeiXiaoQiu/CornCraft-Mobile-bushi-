@@ -1,0 +1,398 @@
+{
+  "pickable": [],
+  "special": {
+    "axe_harvest": {
+      "action": "break",
+      "hint": "gameplay.interaction.axe_harvest",
+      "icon_type_id": "corncraft:filled_slot_axe",
+      "item_action": "axe",
+      "triggers": [
+        "#minecraft:mineable/axe"
+      ]
+    },
+    "hoe_harvest": {
+      "action": "break",
+      "hint": "gameplay.interaction.hoe_harvest",
+      "icon_type_id": "corncraft:filled_slot_hoe",
+      "item_action": "hoe",
+      "triggers": [
+        "#minecraft:mineable/hoe"
+      ]
+    },
+    "pickaxe_harvest": {
+      "action": "break",
+      "hint": "gameplay.interaction.pickaxe_harvest",
+      "icon_type_id": "corncraft:filled_slot_pickaxe",
+      "item_action": "pickaxe",
+      "triggers": [
+        "#minecraft:mineable/pickaxe"
+      ]
+    },
+    "shovel_harvest": {
+      "action": "break",
+      "hint": "gameplay.interaction.shovel_harvest",
+      "icon_type_id": "corncraft:filled_slot_shovel",
+      "item_action": "shovel",
+      "triggers": [
+        "#minecraft:corncraft/shovel_compat"
+      ]
+    },
+    "pick_up": {
+      "action": "break",
+      "hint": "gameplay.interaction.pick_up",
+      "blockstate_predicate": "",
+      "icon_type_id": "corncraft:item_icon",
+      "triggers": [
+        "#minecraft:small_flowers"
+      ]
+    },
+    "go_to_bed": {
+      "action": "interact",
+      "hint": "gameplay.interaction.go_to_bed",
+      "blockstate_predicate": "occupied=false,part=head",
+      "icon_type_id": "corncraft:enter_location",
+      "reusable": true,
+      "triggers": [
+        "#minecraft:beds"
+      ]
+    },
+    "go_to_bed_hidden": {
+      "action": "interact",
+      "hint": "gameplay.interaction.go_to_bed",
+      "blockstate_predicate": "occupied=false,part=foot",
+      "icon_type_id": "corncraft:enter_location",
+      "reusable": true,
+      "show_in_list": false,
+      "triggers": [
+        "#minecraft:beds"
+      ]
+    },
+    "open_door": {
+      "action": "interact",
+      "hint": "gameplay.interaction.open_door",
+      "blockstate_predicate": "open=false,half=lower",
+      "icon_type_id": "corncraft:enter_location",
+      "triggers": [
+        "#minecraft:mob_interactable_doors"
+      ]
+    },
+    "open_door_hidden": {
+      "action": "interact",
+      "hint": "gameplay.interaction.open_door",
+      "blockstate_predicate": "open=false,half=upper",
+      "icon_type_id": "corncraft:enter_location",
+      "show_in_list": false,
+      "triggers": [
+        "#minecraft:mob_interactable_doors"
+      ]
+    },
+    "close_door": {
+      "action": "interact",
+      "hint": "gameplay.interaction.close_door",
+      "blockstate_predicate": "open=true,half=lower",
+      "icon_type_id": "corncraft:dialog",
+      "triggers": [
+        "#minecraft:mob_interactable_doors"
+      ]
+    },
+    "close_door_hidden": {
+      "action": "interact",
+      "hint": "gameplay.interaction.close_door",
+      "blockstate_predicate": "open=true,half=upper",
+      "icon_type_id": "corncraft:dialog",
+      "show_in_list": false,
+      "triggers": [
+        "#minecraft:mob_interactable_doors"
+      ]
+    },
+    "open_trapdoor": {
+      "action": "interact",
+      "hint": "gameplay.interaction.open_trapdoor",
+      "blockstate_predicate": "open=false",
+      "icon_type_id": "corncraft:enter_location",
+      "triggers": [
+        "#minecraft:corncraft/mob_interactable_trapdoors"
+      ]
+    },
+    "close_trapdoor": {
+      "action": "interact",
+      "hint": "gameplay.interaction.close_trapdoor",
+      "blockstate_predicate": "open=true",
+      "icon_type_id": "corncraft:dialog",
+      "triggers": [
+        "#minecraft:corncraft/mob_interactable_trapdoors"
+      ]
+    },
+    "pull_lever_on": {
+      "action": "interact",
+      "hint": "gameplay.interaction.pull_lever",
+      "blockstate_predicate": "powered=false",
+      "icon_type_id": "corncraft:dialog",
+      "triggers": [
+        "minecraft:lever"
+      ]
+    },
+    "pull_lever_off": {
+      "action": "interact",
+      "hint": "gameplay.interaction.pull_lever",
+      "blockstate_predicate": "powered=true",
+      "icon_type_id": "corncraft:dialog",
+      "triggers": [
+        "minecraft:lever"
+      ]
+    },
+    "push_button": {
+      "action": "interact",
+      "hint": "gameplay.interaction.push_button",
+      "blockstate_predicate": "powered=false",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "#minecraft:buttons"
+      ]
+    },
+    "barrel": {
+      "action": "interact",
+      "hint": "container.barrel",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:barrel"
+      ]
+    },
+    "beacon": {
+      "action": "interact",
+      "hint": "container.beacon",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:beacon"
+      ]
+    },
+    "blast_furnace": {
+      "action": "interact",
+      "hint": "container.blast_furnace",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:blast_furnace"
+      ]
+    },
+    "brewing": {
+      "action": "interact",
+      "hint": "container.brewing",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:brewing_stand"
+      ]
+    },
+    "cartography_table": {
+      "action": "interact",
+      "hint": "container.cartography_table",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:cartography_table"
+      ]
+    },
+    "chest": {
+      "action": "interact",
+      "hint": "container.chest",
+      "blockstate_predicate": "type=single",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:chest",
+        "minecraft:trapped_chest"
+      ]
+    },
+    "chest_large": {
+      "action": "interact",
+      "hint": "container.chestDouble",
+      "blockstate_predicate": "type=left",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:chest",
+        "minecraft:trapped_chest"
+      ]
+    },
+    "chest_large_hidden": {
+      "action": "interact",
+      "hint": "container.chestDouble",
+      "blockstate_predicate": "type=right",
+      "icon_type_id": "corncraft:dialog",
+      "show_in_list": false,
+      "reusable": true,
+      "triggers": [
+        "minecraft:chest",
+        "minecraft:trapped_chest"
+      ]
+    },
+    "crafter": {
+      "action": "interact",
+      "hint": "container.crafter",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:crafter"
+      ]
+    },
+    "crafting": {
+      "action": "interact",
+      "hint": "container.crafting",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:crafting_table"
+      ]
+    },
+    "dispenser": {
+      "action": "interact",
+      "hint": "container.dispenser",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:dispenser"
+      ]
+    },
+    "dropper": {
+      "action": "interact",
+      "hint": "container.dropper",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:dropper"
+      ]
+    },
+    "enchant": {
+      "action": "interact",
+      "hint": "container.enchant",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:enchanting_table"
+      ]
+    },
+    "enderchest": {
+      "action": "interact",
+      "hint": "container.enderchest",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:ender_chest"
+      ]
+    },
+    "furnace": {
+      "action": "interact",
+      "hint": "container.furnace",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:furnace"
+      ]
+    },
+    "grindstone": {
+      "action": "interact",
+      "hint": "container.grindstone_title",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:grindstone"
+      ]
+    },
+    "hopper": {
+      "action": "interact",
+      "hint": "container.hopper",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:hopper"
+      ]
+    },
+    "lectern": {
+      "action": "interact",
+      "hint": "container.lectern",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:lectern"
+      ]
+    },
+    "loom": {
+      "action": "interact",
+      "hint": "container.loom",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:loom"
+      ]
+    },
+    "repair": {
+      "action": "interact",
+      "hint": "container.repair",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:anvil",
+        "minecraft:chipped_anvil",
+        "minecraft:damaged_anvil"
+      ]
+    },
+    "shulker_box": {
+      "action": "interact",
+      "hint": "container.shulkerBox",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "#minecraft:shulker_boxes"
+      ]
+    },
+    "smoker": {
+      "action": "interact",
+      "hint": "container.smoker",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:smoker"
+      ]
+    },
+    "stonecutter": {
+      "action": "interact",
+      "hint": "container.stonecutter",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:stonecutter"
+      ]
+    },
+    "upgrade": {
+      "action": "interact",
+      "hint": "container.upgrade",
+      "icon_type_id": "corncraft:dialog",
+      "reusable": true,
+      "triggers": [
+        "minecraft:smithing_table"
+      ]
+    },
+    "dye_sign_text": {
+      "action": "interact",
+      "hint": "gameplay.interaction.dye_sign_text",
+      "icon_type_id": "corncraft:empty_slot_dye",
+      "held_item_predicate": "id_path_ends_with=_dye|_sac",
+      "triggers": [
+        "#minecraft:all_signs"
+      ]
+    },
+    "edit_sign_text": {
+      "action": "interact",
+      "hint": "gameplay.interaction.edit_sign_text",
+      "icon_type_id": "corncraft:dialog",
+      "enabled_predicate": "protocol_version>=763",
+      "triggers": [
+        "#minecraft:all_signs"
+      ]
+    }
+  }
+}

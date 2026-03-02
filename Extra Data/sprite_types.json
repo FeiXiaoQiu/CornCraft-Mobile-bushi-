@@ -1,0 +1,396 @@
+{
+    "corncraft:item_icon": {
+        "texture_id": "corncraft:icon/item_icon",
+        "use_item_model": true
+    },
+    "corncraft:dialog": {
+        "texture_id": "corncraft:icon/dialog",
+        "use_point_filter": false
+    },
+    "corncraft:enter_location": {
+        "texture_id": "corncraft:icon/enter_location",
+        "use_point_filter": false
+    },
+    "corncraft:ride": {
+        "texture_id": "corncraft:icon/ride",
+        "use_point_filter": false
+    },
+
+    "corncraft:empty_armor_slot_helmet": {
+        "texture_id": "minecraft:item/empty_armor_slot_helmet",
+        "invert_color": true
+    },
+    "corncraft:empty_armor_slot_chestplate": {
+        "texture_id": "minecraft:item/empty_armor_slot_chestplate",
+        "invert_color": true
+    },
+    "corncraft:empty_armor_slot_leggings": {
+        "texture_id": "minecraft:item/empty_armor_slot_leggings",
+        "invert_color": true
+    },
+    "corncraft:empty_armor_slot_boots": {
+        "texture_id": "minecraft:item/empty_armor_slot_boots",
+        "invert_color": true
+    },
+    "corncraft:empty_armor_slot_shield": {
+        "texture_id": "minecraft:item/empty_armor_slot_shield",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_axe": {
+        "texture_id": "minecraft:item/empty_slot_axe",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_pickaxe": {
+        "texture_id": "minecraft:item/empty_slot_pickaxe",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_hoe": {
+        "texture_id": "minecraft:item/empty_slot_hoe",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_shovel": {
+        "texture_id": "minecraft:item/empty_slot_shovel",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_sword": {
+        "texture_id": "minecraft:item/empty_slot_sword",
+        "invert_color": true
+    },
+    "corncraft:filled_slot_axe": {
+        "texture_id": "minecraft:item/iron_axe",
+        "filled_color": true
+    },
+    "corncraft:filled_slot_pickaxe": {
+        "texture_id": "minecraft:item/iron_pickaxe",
+        "filled_color": true
+    },
+    "corncraft:filled_slot_hoe": {
+        "texture_id": "minecraft:item/iron_hoe",
+        "filled_color": true
+    },
+    "corncraft:filled_slot_shovel": {
+        "texture_id": "minecraft:item/iron_shovel",
+        "filled_color": true
+    },
+    "corncraft:filled_slot_sword": {
+        "texture_id": "minecraft:item/iron_sword",
+        "filled_color": true
+    },
+    "corncraft:empty_slot_amethyst_shard": {
+        "texture_id": "minecraft:item/empty_slot_amethyst_shard",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_diamond": {
+        "texture_id": "minecraft:item/empty_slot_diamond",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_emerald": {
+        "texture_id": "minecraft:item/empty_slot_emerald",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_ingot": {
+        "texture_id": "minecraft:item/empty_slot_ingot",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_lapis_lazuli": {
+        "texture_id": "minecraft:item/empty_slot_lapis_lazuli",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_quartz": {
+        "texture_id": "minecraft:item/empty_slot_quartz",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_redstone_dust": {
+        "texture_id": "minecraft:item/empty_slot_redstone_dust",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_bottle": {
+        "texture_id": "minecraft:item/empty_slot_bottle",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_banner": {
+        "texture_id": "minecraft:item/empty_slot_banner",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_banner_pattern": {
+        "texture_id": "minecraft:item/empty_slot_banner_pattern",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_banner_pattern_old": {
+        "texture_id": "minecraft:item/empty_slot_banner_pattern_old",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_dye": {
+        "texture_id": "minecraft:item/empty_slot_dye",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_smithing_base_item": {
+        "texture_id": "minecraft:item/empty_armor_slot_helmet",
+        "flipbook_texture_ids": [
+            "minecraft:item/empty_armor_slot_helmet",
+            "minecraft:item/empty_armor_slot_chestplate",
+            "minecraft:item/empty_armor_slot_leggings",
+            "minecraft:item/empty_armor_slot_boots",
+            "minecraft:item/empty_slot_axe",
+            "minecraft:item/empty_slot_pickaxe",
+            "minecraft:item/empty_slot_hoe",
+            "minecraft:item/empty_slot_shovel",
+            "minecraft:item/empty_slot_sword"
+        ],
+        "invert_color": true
+    },
+    "corncraft:empty_slot_smithing_additional_item": {
+        "texture_id": "minecraft:item/empty_slot_amethyst_shard",
+        "flipbook_texture_ids": [
+            "minecraft:item/empty_slot_amethyst_shard",
+            "minecraft:item/empty_slot_diamond",
+            "minecraft:item/empty_slot_emerald",
+            "minecraft:item/empty_slot_ingot",
+            "minecraft:item/empty_slot_lapis_lazuli",
+            "minecraft:item/empty_slot_quartz",
+            "minecraft:item/empty_slot_redstone_dust"
+        ],
+        "invert_color": true
+    },
+    "corncraft:empty_slot_smithing_template_armor_trim": {
+        "texture_id": "minecraft:item/empty_slot_smithing_template_armor_trim",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_smithing_template_netherite_upgrade": {
+        "texture_id": "minecraft:item/empty_slot_smithing_template_netherite_upgrade",
+        "invert_color": true
+    },
+    "corncraft:empty_slot_smithing_template_item": {
+        "texture_id": "minecraft:item/empty_slot_smithing_template_armor_trim",
+        "flipbook_texture_ids": [
+            "minecraft:item/empty_slot_smithing_template_armor_trim",
+            "minecraft:item/empty_slot_smithing_template_netherite_upgrade"
+        ],
+        "invert_color": true
+    },
+
+    "corncraft:arrow_empty": {
+        "texture_id": "corncraft:icon/arrow_empty",
+        "use_point_filter": false
+    },
+    "corncraft:arrow_progress": {
+        "texture_id": "corncraft:icon/arrow",
+        "use_point_filter": false,
+        "image_type": "filled",
+        "fill_type": "left"
+    },
+    "corncraft:arrow": {
+        "texture_id": "corncraft:icon/arrow",
+        "use_point_filter": false
+    },
+    "corncraft:plus": {
+        "texture_id": "corncraft:icon/plus"
+    },
+    "corncraft:check": {
+        "texture_id": "corncraft:icon/check",
+        "use_point_filter": false
+    },
+    "corncraft:cross": {
+        "texture_id": "corncraft:icon/cross",
+        "use_point_filter": false
+    },
+
+    "corncraft:gui_mob_effect_level_up": {
+        "texture_id": "minecraft:mob_effect/speed",
+        "flipbook_texture_ids": [
+            "minecraft:mob_effect/speed",
+            "minecraft:mob_effect/haste",
+            "minecraft:mob_effect/resistance",
+            "minecraft:mob_effect/jump_boost",
+            "minecraft:mob_effect/strength"
+        ]
+    },
+    "corncraft:gui_mob_effect_speed": {
+        "texture_id": "minecraft:mob_effect/speed"
+    },
+    "corncraft:gui_mob_effect_slowness": {
+        "texture_id": "minecraft:mob_effect/slowness"
+    },
+    "corncraft:gui_mob_effect_haste": {
+        "texture_id": "minecraft:mob_effect/haste"
+    },
+    "corncraft:gui_mob_effect_mining_fatigue": {
+        "texture_id": "minecraft:mob_effect/mining_fatigue"
+    },
+    "corncraft:gui_mob_effect_strength": {
+        "texture_id": "minecraft:mob_effect/strength"
+    },
+    "corncraft:gui_mob_effect_instant_health": {
+        "texture_id": "minecraft:mob_effect/instant_health"
+    },
+    "corncraft:gui_mob_effect_instant_damage": {
+        "texture_id": "minecraft:mob_effect/instant_damage"
+    },
+    "corncraft:gui_mob_effect_jump_boost": {
+        "texture_id": "minecraft:mob_effect/jump_boost"
+    },
+    "corncraft:gui_mob_effect_jump_nausea": {
+        "texture_id": "minecraft:mob_effect/nausea"
+    },
+    "corncraft:gui_mob_effect_regeneration": {
+        "texture_id": "minecraft:mob_effect/regeneration"
+    },
+    "corncraft:gui_mob_effect_resistance": {
+        "texture_id": "minecraft:mob_effect/resistance"
+    },
+    "corncraft:gui_mob_effect_fire_resistance": {
+        "texture_id": "minecraft:mob_effect/fire_resistance"
+    },
+    "corncraft:gui_mob_effect_water_breathing": {
+        "texture_id": "minecraft:mob_effect/water_breathing"
+    },
+    "corncraft:gui_mob_effect_invisibility": {
+        "texture_id": "minecraft:mob_effect/invisibility"
+    },
+    "corncraft:gui_mob_effect_blindness": {
+        "texture_id": "minecraft:mob_effect/blindness"
+    },
+    "corncraft:gui_mob_effect_night_vision": {
+        "texture_id": "minecraft:mob_effect/night_vision"
+    },
+    "corncraft:gui_mob_effect_hunger": {
+        "texture_id": "minecraft:mob_effect/hunger"
+    },
+    "corncraft:gui_mob_effect_weakness": {
+        "texture_id": "minecraft:mob_effect/weakness"
+    },
+    "corncraft:gui_mob_effect_poison": {
+        "texture_id": "minecraft:mob_effect/poison"
+    },
+    "corncraft:gui_mob_effect_wither": {
+        "texture_id": "minecraft:mob_effect/wither"
+    },
+    "corncraft:gui_mob_effect_health_boost": {
+        "texture_id": "minecraft:mob_effect/health_boost"
+    },
+    "corncraft:gui_mob_effect_absorption": {
+        "texture_id": "minecraft:mob_effect/absorption"
+    },
+    "corncraft:gui_mob_effect_saturation": {
+        "texture_id": "minecraft:mob_effect/saturation"
+    },
+    "corncraft:gui_mob_effect_glowing": {
+        "texture_id": "minecraft:mob_effect/glowing"
+    },
+    "corncraft:gui_mob_effect_levitation": {
+        "texture_id": "minecraft:mob_effect/levitation"
+    },
+    "corncraft:gui_mob_effect_luck": {
+        "texture_id": "minecraft:mob_effect/luck"
+    },
+    "corncraft:gui_mob_effect_unluck": {
+        "texture_id": "minecraft:mob_effect/unluck"
+    },
+    "corncraft:gui_mob_effect_slow_falling": {
+        "texture_id": "minecraft:mob_effect/slow_falling"
+    },
+    "corncraft:gui_mob_effect_conduit_power": {
+        "texture_id": "minecraft:mob_effect/conduit_power"
+    },
+    "corncraft:gui_mob_effect_dolphins_grace": {
+        "texture_id": "minecraft:mob_effect/dolphins_grace"
+    },
+    "corncraft:gui_mob_effect_bad_omen": {
+        "texture_id": "minecraft:mob_effect/bad_omen"
+    },
+    "corncraft:gui_mob_effect_hero_of_the_village": {
+        "texture_id": "minecraft:mob_effect/hero_of_the_village"
+    },
+    "corncraft:gui_mob_effect_darkness": {
+        "texture_id": "minecraft:mob_effect/darkness"
+    },
+    "corncraft:gui_mob_effect_trial_omen": {
+        "texture_id": "minecraft:mob_effect/trial_omen"
+    },
+    "corncraft:gui_mob_effect_raid_omen": {
+        "texture_id": "minecraft:mob_effect/raid_omen"
+    },
+    "corncraft:gui_mob_effect_wind_charged": {
+        "texture_id": "minecraft:mob_effect/wind_charged"
+    },
+    "corncraft:gui_mob_effect_weaving": {
+        "texture_id": "minecraft:mob_effect/weaving"
+    },
+    "corncraft:gui_mob_effect_oozing": {
+        "texture_id": "minecraft:mob_effect/oozing"
+    },
+    "corncraft:gui_mob_effect_infested": {
+        "texture_id": "minecraft:mob_effect/infested"
+    },
+
+    "corncraft:gui_background_beacon": {
+        "texture_id": "corncraft:background/background_beacon"
+    },
+    "corncraft:gui_background_brewing": {
+        "texture_id": "corncraft:background/background_brewing"
+    },
+    "corncraft:gui_background_enchantment": {
+        "texture_id": "corncraft:background/background_enchantment"
+    },
+    "corncraft:gui_background_loom": {
+        "texture_id": "corncraft:background/background_loom"
+    },
+    "corncraft:gui_iron_hammer": {
+        "texture_id": "corncraft:icon/gui_iron_hammer"
+    },
+    "corncraft:gui_netherite_hammer": {
+        "texture_id": "corncraft:icon/gui_netherite_hammer"
+    },
+    "corncraft:gui_furnace_fire_empty": {
+        "texture_id": "corncraft:icon/gui_furnace_fire_empty"
+    },
+    "corncraft:gui_furnace_fire_progress": {
+        "texture_id": "corncraft:icon/gui_furnace_fire_full",
+        "image_type": "filled",
+        "fill_type": "bottom"
+    },
+    "corncraft:gui_grindstone": {
+        "texture_id": "corncraft:icon/gui_grindstone"
+    },
+    "corncraft:gui_enchantment_top_enabled": {
+        "texture_id": "corncraft:icon/gui_enchantment_top_enabled"
+    },
+    "corncraft:gui_enchantment_top_disabled": {
+        "texture_id": "corncraft:icon/gui_enchantment_top_disabled"
+    },
+    "corncraft:gui_enchantment_middle_enabled": {
+        "texture_id": "corncraft:icon/gui_enchantment_middle_enabled"
+    },
+    "corncraft:gui_enchantment_middle_disabled": {
+        "texture_id": "corncraft:icon/gui_enchantment_middle_disabled"
+    },
+    "corncraft:gui_enchantment_bottom_enabled": {
+        "texture_id": "corncraft:icon/gui_enchantment_bottom_enabled"
+    },
+    "corncraft:gui_enchantment_bottom_disabled": {
+        "texture_id": "corncraft:icon/gui_enchantment_bottom_disabled"
+    },
+    "corncraft:gui_brewing_fuel_progress": {
+        "texture_id": "corncraft:icon/gui_brewing_fuel",
+        "image_type": "filled",
+        "fill_type": "left"
+    },
+    "corncraft:gui_brewing_arrow_empty": {
+        "texture_id": "corncraft:icon/gui_brewing_arrow_empty"
+    },
+    "corncraft:gui_brewing_arrow_progress": {
+        "texture_id": "corncraft:icon/gui_brewing_arrow_full",
+        "image_type": "filled",
+        "fill_type": "top"
+    },
+    "corncraft:gui_brewing_bubbles_empty": {
+        "texture_id": "corncraft:icon/gui_brewing_bubbles_empty"
+    },
+    "corncraft:gui_brewing_bubbles_progress": {
+        "texture_id": "corncraft:icon/gui_brewing_bubbles_full",
+        "image_type": "filled",
+        "fill_type": "bottom",
+        "fill_start": 0.16666667,
+        "fill_end": 0.8888889
+    }
+}

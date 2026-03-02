@@ -1,1 +1,70 @@
-# CornCraft-Mobile-bushi-
+English | [简体中文](README.zh-CN.md)
+
+# CornCraft
+A Minecraft **Java Edition** client implementation made with Unity.
+
+## > About
+**CornCraft** is a Unity version of Minecraft. It connects to Java Edition servers(version 1.16.2 to 1.21.1) and provides basic graphical gameplay support.
+
+This project does not mean to be a Minecraft "clone", but rather an attempt to recreate the game in a somewhat different way, with the overall look and feel distinct from the original one.
+
+The protocol implementation is based on another open source project, [Minecraft Console Client (MCC)](https://github.com/MCCTeam/Minecraft-Console-Client), by incorporating code from this project as a foundation for cross-version networking with Minecraft servers. However, due to different runtime backends(Mono for Unity vs .NET for MCC) and other major parity issues regarding input and rendering, it is not an option to directly use MCC code as a library despite the fact that they're both in C#, and a number of tweaks and rewrites were needed for everything to work fine in this new framework.
+
+***Important!*** It is **NOT** recommended to join a public/commercial server with CornCraft, and CornCraft is **NOT** responsible for server banning due to using this client! The best and safest way to play with this client, at least for now, is to set up a local server and play it with your friends.
+
+The code CornCraft uses to parse vanilla resource packs is also open source as a Unity package called [CraftSharp-Resource](https://github.com/DevBobcorn/CraftSharp-Resource). Check it out if you want to make a Minecraft structure viewer, map editor or something like that with Unity.
+
+## > Server Setup
+Recommended server versions for CornCraft are <code>1.16.5</code>, <code>1.17.1</code> and <code>1.18.2</code>, both vanilla servers and plugin servers like Spigot are supported.
+
+For <code>1.19.1</code> or higher servers, it is also necessary to set <code>enforce-secure-profile</code> to <code>false</code> so that CornCraft can log in correctly.
+
+## > Building & Running
+The project is made and tested with Unity 6000.3.1f1, so it is recommended to use this(or a newer) version of Unity to build this game.
+
+**Some third-party assets are not included in this repo**, for more information please see [here](./Assets/Third%20Party%20Assets.md).
+
+Vanilla resource files will now be automatically downloaded if not present, and manual preparation is no longer necessary.
+
+## > Controls
+Most basic controls in CornCraft are similar to vanilla Java Edition. These are hard-coded for now, but will be configurable in the future. Here's a list of currently supported actions:
+Key                                                       | Action
+---                                                       | :---:
+<kbd>W</kbd> / <kbd>A</kbd> / <kbd>S</kbd> / <kbd>D</kbd> | Move Horizontally
+<kbd>Space</kbd>                                          | Move Up/Jump
+<kbd>Space</kbd> * 2                                      | Toggle Flight (Creative Mode)
+<kbd>Left Shift</kbd>                                     | Sneak/Move Down
+<kbd>Left Ctrl</kbd>                                      | Sprint
+<kbd>Mouse Scroll</kbd>                                   | Select Hotbar Slot
+<kbd>Alt (Hold)</kbd> + <kbd>Mouse Scroll</kbd>           | Select Interaction Option
+<kbd>E</kbd>                                              | Open Player Inventory
+<kbd>F</kbd>                                              | Swap Items on Hands
+<kbd>R</kbd>                                              | Toggle Camera Focus Lock
+<kbd>X</kbd>                                              | Perform Interaction
+<kbd>F3</kbd>                                             | Toggle Debug Info
+<kbd>F3 (Hold)</kbd> + <kbd>F4</kbd>                      | Show Game Mode Switch
+<kbd>F5 (Hold)</kbd> + <kbd>C</kbd>                              | Rebuild Chunks
+<kbd>F5 (Hold)</kbd> + <kbd>L</kbd>                              | Update Global Illumination
+<kbd>F6</kbd> / <kbd>F7</kbd> / <kbd>F8</kbd>             | Load Previous/Reload/Load Next Player Model
+<kbd>F11</kbd>                                            | Toggle Fullscreen
+<kbd>Shift (Hold)</kbd> + <kbd>Tab</kbd>                         | Switch to Next Camera Controller
+<kbd>Shift (Hold)</kbd> + <kbd>Mouse Scroll</kbd>                | Adjust Camera Zoom
+<kbd>T</kbd> / <kbd>/</kbd>                               | Show Chat Screen/Input Command
+<kbd>P</kbd>                                              | Show Packet Inspector Screen
+<kbd>Tab</kbd>                                            | Command Auto-Completion
+<kbd>Esc</kbd>                                            | Pause Game
+
+## > License
+Like MCC, CornCraft adopts CDDL-1.0 as the license of its code repository, and this license applies to all source code except those mentioning their license or with custom license attached.
+
+Some other open-source projects/code examples are used in the project, which don't fall under CDDL-1.0 and use their own licenses. Here's a list of them:
+* [Welai Glow Sans](https://github.com/welai/glow-sans): Used as font for regular game UI
+* [Cascadia Code/Mono](https://github.com/microsoft/cascadia-code): Used as font for command input/technical information
+* [Minecraft Data](https://github.com/PrismarineJS/minecraft-data): Protocol data for packet inspection
+
+More information about CDDL-1.0 can be found on MCC's [home page](https://github.com/MCCTeam/Minecraft-Console-Client), in the license section, and the full license can be viewed [here](./LICENSE.md).
+
+## > Screenshots
+![Screenshot 2026-01-18 170915.png](https://s2.loli.net/2026/01/18/ghF9QXUHGpDysnm.png)
+![CornCraft021.png](https://s2.loli.net/2024/10/28/kas4ZD8cgrfb6xn.png)
+![CornCraft020.png](https://s2.loli.net/2024/10/28/xFVCbJNwH6qAZ2E.png)

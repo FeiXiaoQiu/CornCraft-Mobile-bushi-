@@ -1,0 +1,2880 @@
+using System;
+using System.Collections.Generic;
+using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
+using System.IO;
+using System.Linq;
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+using CraftSharp.Control;
+using CraftSharp.Event;
+using CraftSharp.Protocol;
+using CraftSharp.Protocol.Handlers;
+using CraftSharp.Protocol.ProfileKey;
+using CraftSharp.Protocol.Message;
+using CraftSharp.Proxy;
+using CraftSharp.UI;
+using CraftSharp.Inventory;
+using CraftSharp.Inventory.Recipe;
+using CraftSharp.Rendering;
+using CraftSharp.Protocol.Session;
+using Unity.Mathematics;
+
+namespace CraftSharp
+{
+    [RequireComponent(typeof (InteractionUpdater))]
+    public class CornClientOnline : BaseCornClient, IMinecraftComHandler
+    {
+        #nullable enable
+
+        #region Login Information
+        private string? host;
+        private int port;
+        private int protocolVersion;
+        private string? receivedVersionName;
+        private string? username;
+        private Guid uuid;
+        private string? sessionId;
+        private string accountLower = string.Empty;
+        private PlayerKeyPair? playerKeyPair;
+
+        // Cookies
+        private Dictionary<string, byte[]> Cookies { get; } = new();
+        public void GetCookie(string key, out byte[]? data) => Cookies.TryGetValue(key, out data);
+        public void SetCookie(string key, byte[] data) => Cookies[key] = data;
+        public void DeleteCookie(string key) => Cookies.Remove(key, out _);
+        #endregion
+
+        #region Thread and Chat Control
+        private readonly Queue<Action> threadTasks = new();
+        private readonly object threadTasksLock = new();
+
+        private readonly Queue<string> chatQueue = new();
+        private DateTime nextMessageSendTime = DateTime.MinValue;
+        private bool canSendMessage = false;
+
+        #endregion
+
+        #region Time and Networking
+        private DateTime lastKeepAlive;
+        private readonly object lastKeepAliveLock = new();
+        private long lastAge = 0L;
+        private DateTime lastTime;
+        private double serverTPS = 0;
+        private double averageTPS = 20;
+        private const int maxSamples = 5;
+        private readonly List<double> tpsSamples = new(maxSamples);
+        private double sampleSum = 0;
+        private int packetCount = 0;
+
+        private TcpClient? client;
+        private IMinecraftCom? handler;
+        private SessionToken? _sessionToken;
+        private Tuple<Thread, CancellationTokenSource>? timeoutDetector = null;
+        #endregion
+
+        #nullable disable
+
+        #region Players and Entities
+        private bool locationReceived = false;
+        private readonly EntitySpawnData _clientEntitySpawn = new(CLIENT_ENTITY_ID_INTERNAL, EntityType.DUMMY_ENTITY_TYPE, Location.Zero);
+        private float maximumHealth = -0F;
+        private float currentHealth = -0F;
+        public override float CurrentHealth => currentHealth;
+        private int sequenceId; // User for player block synchronization (Aka. digging, placing blocks, etc..)
+        private int currentHunger;
+        private float currentSaturation;
+        private int experienceLevel, totalExperience;
+        public override int ExperienceLevel => experienceLevel;
+        private int activeInventoryId = -1;
+        private readonly Dictionary<int, InventoryData> inventories = new();
+        private readonly Dictionary<ResourceLocation, List<RecipeExtraData>> receivedRecipes = new();
+
+        public override List<RecipeExtraData> GetReceivedRecipes(ResourceLocation recipeTypeId)
+        {
+            return receivedRecipes.TryGetValue(recipeTypeId, out var list) ? list : new List<RecipeExtraData>(0);
+        }
+        
+        private ItemStack dragStartCursorItemClone; // Keep a copy of cursor item before drag start
+        private readonly Dictionary<int, int> draggedSlots = new(); // And keep track of the initial count of each dragged slot
+        private bool dragging = false;
+        
+        public override bool CheckAddDragged(ItemStack slotItem, Func<ItemStack, bool> slotPredicate)
+        {
+            if (!dragging || dragStartCursorItemClone is null) return false;
+
+            // If the count of original cursor stack is greater than the count of dragged slots,
+            // then we can still add more dragged slots, making sure each can get at least one item.
+            if (dragStartCursorItemClone.Count <= draggedSlots.Count) return false;
+            
+            // If this slot doesn't accept the dragging item, don't add this slot
+            if (!slotPredicate(dragStartCursorItemClone)) return false;
+            
+            if (slotItem is null) return true;
+            
+            return InventoryData.CheckStackable(slotItem, dragStartCursorItemClone);
+        }
+
+        private readonly object movementLock = new();
+        private readonly Dictionary<Guid, PlayerInfo> onlinePlayers = new();
+        #endregion
+
+        private void Awake() // In case where the client wasn't properly assigned before
+        {
+            if (!CornApp.CurrentClient)
+            {
+                CornApp.SetCurrentClient(this);
+            }
+        }
+
+        private void Start()
+        {
+            // Set up screen control
+            ScreenControl.SetClient(this);
+            ScreenControl.SetLoadingScreen(true);
+            
+            // Set up chunk render manager
+            ChunkRenderManager.SetClient(this);
+
+            // Set up environment manager
+            EnvironmentManager.SetCamera(m_MainCamera);
+
+            // Freeze player controller until terrain is ready
+            PlayerController.DisablePhysics();
+            
+            // Add handlers for player controller
+            PlayerController.OnPlayerAction += actionType =>
+            {
+                //Debug.Log(Translations.Get($"Player action: {actionType}"));
+                
+                SendEntityAction(actionType);
+            };
+        }
+
+        public override bool StartClient(StartLoginInfo info)
+        {
+            var session = info.Session;
+
+            sessionId = session.Id;
+            if (!Guid.TryParse(session.PlayerId, out uuid))
+            {
+                uuid = Guid.Empty;
+            }
+            username = session.PlayerName;
+            host = info.ServerIp;
+            port = info.ServerPort;
+            protocolVersion = info.ProtocolVersion;
+            playerKeyPair = info.Player;
+            accountLower = info.AccountLower;
+            receivedVersionName = info.ReceivedVersionName;
+
+            _sessionToken = session;
+
+            // Start up client
+            try
+            {
+                // Setup tcp client
+                client = ProxyHandler.NewTcpClient(host, port);
+                client!.ReceiveBufferSize = 1024 * 1024;
+                client.ReceiveTimeout = 30000; // 30 seconds
+
+                // Create handler
+                handler = ProtocolHandler.GetProtocolHandler(client, info.ProtocolVersion, this);
+
+                // Start update loop
+                timeoutDetector = Tuple.Create(new Thread(TimeoutDetector), new CancellationTokenSource());
+                timeoutDetector.Item1.Name = "Connection Timeout Detector";
+                timeoutDetector.Item1.Start(timeoutDetector.Item2.Token);
+
+                if (handler!.Login(playerKeyPair, session, accountLower)) // Login
+                {
+                    // Update entity type for dummy client entity
+                    _clientEntitySpawn.Type = EntityTypePalette.INSTANCE.GetById(EntityType.PLAYER_ID);
+                    // Update client entity name
+                    _clientEntitySpawn.Name = session.PlayerName;
+                    _clientEntitySpawn.UUID = uuid;
+                    Debug.Log($"Client uuid: {uuid}");
+                    maximumHealth = 20F;
+                    
+                    // Assign Entity render manager
+                    PlayerController.SetEntityRenderManager(EntityRenderManager);
+
+                    // Create player render
+                    SwitchToFirstPlayerRender(_clientEntitySpawn);
+                    // Create camera controller
+                    SwitchToFirstCameraController();
+                    
+                    // Initialize material presets
+                    if (ChunkMaterialManager && ChunkMaterialManager.ChunkMaterialPreset)
+                    {
+                        var chunkPreset = ChunkMaterialManager.ChunkMaterialPreset;
+
+                        EnvironmentManager.SetFogEnabled(chunkPreset.EnableFog);
+                    }
+
+                    return true; // Client successfully started
+                }
+                Debug.LogError(Translations.Get("error.login_failed"));
+                Disconnect();
+            }
+            catch (Exception e)
+            {
+                client = ProxyHandler.NewTcpClient(host, port);
+                client!.ReceiveBufferSize = 1024 * 1024;
+                client.ReceiveTimeout = 30000; // 30 seconds
+
+                Debug.LogError(Translations.Get("error.connect", e.Message));
+                Debug.LogError(e.StackTrace);
+                Disconnect();
+            }
+
+            return false; // Failed to start client
+        }
+
+        private void Update()
+        {
+            if (Keyboard.current != null && Keyboard.current.f5Key.isPressed)
+            {
+                if (Keyboard.current.lKey.wasPressedThisFrame) // Debug function, update environment lighting
+                {
+                    CornApp.Notify(Translations.Get("rendering.debug.update_env_lighting"));
+                    // Recalculate dynamic GI
+                    DynamicGI.UpdateEnvironment();
+                }
+                
+                if (Keyboard.current.cKey.wasPressedThisFrame) // Debug function, rebuild chunk renders
+                {
+                    CornApp.Notify(Translations.Get("rendering.debug.reload_chunk_render"));
+                    // Don't destroy block entity renders
+                    ChunkRenderManager.ReloadChunksRender(false);
+                }
+            }
+
+            var playerPos = PlayerController.transform.position;
+
+            if (Mathf.Abs(playerPos.x) > 512F || Mathf.Abs(playerPos.z) > 512F)
+            {
+                // World origin shifting logic
+                var updatedOffset = WorldOriginOffset;
+
+                while (playerPos.x > 512F)
+                {
+                    playerPos.x -= 512F;
+                    updatedOffset.x += 1;
+                }
+
+                while (playerPos.x < -512F)
+                {
+                    playerPos.x += 512F;
+                    updatedOffset.x -= 1;
+                }
+
+                while (playerPos.z > 512F)
+                {
+                    playerPos.z -= 512F;
+                    updatedOffset.z += 1;
+                }
+
+                while (playerPos.z < -512F)
+                {
+                    playerPos.z += 512F;
+                    updatedOffset.z -= 1;
+                }
+
+                SetWorldOriginOffset(updatedOffset);
+            }
+
+            if (Keyboard.current != null)
+            {
+                if (PlayerController)
+                {
+                    if (Keyboard.current.f6Key.wasPressedThisFrame) // Select previous
+                    {
+                        SwitchPlayerRenderBy(_clientEntitySpawn, -1);
+                    }
+                    else if (Keyboard.current.f7Key.wasPressedThisFrame) // Regenerate current prefab
+                    {
+                        SwitchPlayerRenderBy(_clientEntitySpawn,  0);
+                    }
+                    else if (Keyboard.current.f8Key.wasPressedThisFrame) // Select next
+                    {
+                        SwitchPlayerRenderBy(_clientEntitySpawn,  1);
+                    }
+                }
+
+                if (Keyboard.current.shiftKey.isPressed)
+                {
+                    if (Keyboard.current.tabKey.wasPressedThisFrame) // Select next camera controller
+                    {
+                        SwitchCameraControllerBy(1);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Retrieve messages from the queue and send.
+        /// Note: requires external locking.
+        /// </summary>
+        private void TrySendMessageToServer()
+        {
+            if (!canSendMessage)
+            {
+                //Debug.LogWarning("Not allowed to send message now!");
+                return;
+            }
+
+            while (chatQueue.Count > 0 && nextMessageSendTime < DateTime.Now)
+            {
+                var text = chatQueue.Dequeue();
+                handler!.SendChatMessage(text, playerKeyPair);
+                nextMessageSendTime = DateTime.Now + TimeSpan.FromSeconds(ProtocolSettings.MessageCooldown);
+            }
+        }
+        
+        /// <summary>
+        /// Called ~20 times per second by the protocol handler (on net read thread)
+        /// </summary>
+        public void OnHandlerUpdate(int pc)
+        {
+            lock (chatQueue)
+            {
+                TrySendMessageToServer();
+            }
+
+            if (locationReceived)
+            {
+                lock (movementLock)
+                {
+                    handler?.SendLocationUpdate(
+                            PlayerController.Location2Send,
+                            PlayerController.IsGrounded2Send,
+                            PlayerController.MCYaw2Send,
+                            PlayerController.Pitch2Send);
+
+                    // First 2 updates must be player position AND look, and player must not move (to conform with vanilla)
+                    // Once yaw and pitch have been sent, switch back to location-only updates (without yaw and pitch)
+                    //yawToSend = pitchToSend = null;
+                }
+            }
+
+            lock (threadTasksLock)
+            {
+                while (threadTasks.Count > 0)
+                {
+                    var taskToRun = threadTasks.Dequeue();
+                    taskToRun();
+                }
+            }
+
+            packetCount = pc;
+        }
+
+        public void Transfer(string newHost, int newPort)
+        {
+            try
+            {
+                Debug.Log($"Initiating a transfer to: {host}:{port}");
+
+                // Clear world data
+                ChunkRenderManager.ClearChunksData();
+                
+                Loom.QueueOnMainThread(() =>
+                {
+                    EntityRenderManager.ReloadEntityRenders();
+                });
+
+                // Close existing connection
+                client!.Close();
+
+                // Establish new connection
+                client = ProxyHandler.NewTcpClient(newHost, newPort);
+                client!.ReceiveBufferSize = 1024 * 1024;
+                client.ReceiveTimeout = 30000; // 30 seconds
+
+                // Reinitialize the protocol handler
+                handler = ProtocolHandler.GetProtocolHandler(client, protocolVersion, this);
+                Debug.Log($"Connected to {host}:{port}");
+
+                // Retry login process
+                if (handler!.Login(playerKeyPair, _sessionToken!, accountLower))
+                {
+                    // TODO: Prepare client scene
+                    Debug.Log("Successfully transferred connection and logged in.");
+                }
+                else
+                {
+                    Debug.LogError("Failed to login to the new host.");
+                    throw new Exception("Login failed after transfer.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"Transfer to {newHost}:{newPort} failed: {ex.Message}");
+
+                // Handle reconnection attempts
+                if (timeoutDetector != null)
+                {
+                    timeoutDetector.Item2.Cancel();
+                    timeoutDetector = null;
+                }
+
+                throw new Exception("Transfer failed.");
+            }
+        }
+
+        #region Disconnect logic
+
+        /// <summary>
+        /// Periodically checks for server keepalives and consider that connection has been lost if the last received keepalive is too old.
+        /// </summary>
+        private void TimeoutDetector(object o)
+        {
+            var token = (CancellationToken) o;
+            UpdateKeepAlive();
+
+            do
+            {
+                for (var i = 0; i < 30; i++) // 15 seconds in total
+                {
+                    Thread.Sleep(TimeSpan.FromSeconds(0.5));
+
+                    if (token.IsCancellationRequested) break;
+                }
+
+                if (token.IsCancellationRequested)
+                    return;
+                
+                lock (lastKeepAliveLock)
+                {
+                    if (lastKeepAlive.AddSeconds(30) < DateTime.Now)
+                    {
+                        if (token.IsCancellationRequested)
+                            return;
+                        
+                        OnConnectionLost(DisconnectReason.ConnectionLost, Translations.Get("error.timeout"));
+                        return;
+                    }
+                }
+            }
+            while (!token.IsCancellationRequested);
+        }
+
+        /// <summary>
+        /// Update last keep alive to current time
+        /// </summary>
+        private void UpdateKeepAlive()
+        {
+            lock (lastKeepAliveLock)
+            {
+                lastKeepAlive = DateTime.Now;
+            }
+        }
+
+        /// <summary>
+        /// Disconnect the client from the server
+        /// </summary>
+        public override void Disconnect()
+        {
+            handler?.Disconnect();
+            handler?.Dispose();
+            handler = null;
+
+            timeoutDetector?.Item2.Cancel();
+            timeoutDetector = null;
+
+            client?.Close();
+            client = null;
+            
+            Loom.QueueOnMainThread(() =>
+            {
+                // Clear item mesh cache
+                ItemMeshBuilder.ClearMeshCache();
+                
+                // Return to login scene
+                CornApp.BackToLogin();
+            });
+        }
+
+        /// <summary>
+        /// When connection has been lost, login was denied or player was kicked from the server
+        /// </summary>
+        public void OnConnectionLost(DisconnectReason reason, string message)
+        {
+            Loom.QueueOnMainThread(() =>
+            {
+                // Clear world data
+                ChunkRenderManager.ClearChunksData();
+                EntityRenderManager.ReloadEntityRenders();
+            });
+
+            switch (reason)
+            {
+                case DisconnectReason.ConnectionLost:
+                    Debug.Log(Translations.Get("mcc.disconnect.lost"));
+                    break;
+                case DisconnectReason.InGameKick:
+                    Debug.Log(Translations.Get("mcc.disconnect.server") + message);
+                    break;
+                case DisconnectReason.LoginRejected:
+                    Debug.Log(Translations.Get("mcc.disconnect.login") + message);
+                    break;
+                case DisconnectReason.UserLogout:
+                    throw new InvalidOperationException(Translations.Get("exception.user_logout"));
+            }
+
+            Disconnect();
+        }
+
+        #endregion
+
+        #region Thread-Invoke: Cross-thread method calls
+
+        /// <summary>
+        /// Invoke a task on the main thread, wait for completion and retrieve return value.
+        /// </summary>
+        /// <param name="task">Task to run with any type or return value</param>
+        /// <returns>Any result returned from task, result type is inferred from the task</returns>
+        /// <example>bool result = InvokeOnNetMainThread(methodThatReturnsABool);</example>
+        /// <example>bool result = InvokeOnNetMainThread(() => methodThatReturnsABool(argument));</example>
+        /// <example>int result = InvokeOnNetMainThread(() => { yourCode(); return 42; });</example>
+        /// <typeparam name="T">Type of the return value</typeparam>
+        public override T InvokeOnNetMainThread<T>(Func<T> task)
+        {
+            return InvokeOnNetMainThreadAsync(task).GetAwaiter().GetResult();
+        }
+
+        /// <summary>
+        /// Invoke a task on the main thread and wait for completion
+        /// </summary>
+        /// <param name="task">Task to run without return value</param>
+        /// <example>InvokeOnNetMainThread(methodThatReturnsNothing);</example>
+        /// <example>InvokeOnNetMainThread(() => methodThatReturnsNothing(argument));</example>
+        /// <example>InvokeOnNetMainThread(() => { yourCode(); });</example>
+        public override void InvokeOnNetMainThread(Action task)
+        {
+            InvokeOnNetMainThreadAsync(task).GetAwaiter().GetResult();
+        }
+
+        /// <summary>
+        /// Invoke a task on the main thread, return a task that completes once done.
+        /// </summary>
+        public override Task<T> InvokeOnNetMainThreadAsync<T>(Func<T> task)
+        {
+            if (!InvokeRequired)
+            {
+                try
+                {
+                    return Task.FromResult(task());
+                }
+                catch (Exception ex)
+                {
+                    return Task.FromException<T>(ex);
+                }
+            }
+
+            var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (threadTasksLock)
+            {
+                threadTasks.Enqueue(() =>
+                {
+                    try
+                    {
+                        var result = task();
+                        tcs.SetResult(result);
+                    }
+                    catch (Exception ex)
+                    {
+                        tcs.SetException(ex);
+                    }
+                });
+            }
+            return tcs.Task;
+        }
+
+        /// <summary>
+        /// Invoke a task on the main thread asynchronously.
+        /// </summary>
+        public override Task InvokeOnNetMainThreadAsync(Action task)
+        {
+            return InvokeOnNetMainThreadAsync(() =>
+            {
+                task();
+                return true;
+            });
+        }
+
+        /// <summary>
+        /// Clear all tasks
+        /// </summary>
+        private void ClearTasks()
+        {
+            lock (threadTasksLock)
+            {
+                threadTasks.Clear();
+            }
+        }
+
+        /// <summary>
+        /// Check if running on a different thread and InvokeOnNetMainThread is required
+        /// </summary>
+        /// <returns>True if calling thread is not the main thread</returns>
+        private bool InvokeRequired
+        {
+            get
+            {
+                var callingThreadId = Thread.CurrentThread.ManagedThreadId;
+                if (handler != null)
+                {
+                    return handler.GetNetMainThreadId() != callingThreadId;
+                }
+
+                // net main thread not yet ready
+                return false;
+            }
+        }
+
+        #endregion
+
+        #region Getters: Retrieve data for use in other methods
+        #nullable enable
+
+        // Retrieve client connection info
+        public override string GetServerHost() => host!;
+        public override int GetServerPort() => port;
+        public override int GetProtocolVersion() => protocolVersion;
+        public override string GetUsername() => username!;
+        public override Guid GetUserUUID() => uuid;
+        public override string GetUserUUIDStr() => uuid.ToString().Replace("-", string.Empty);
+        public override string GetSessionId() => sessionId!;
+        public override double GetServerAverageTps() => averageTPS;
+        public override double GetLatestServerTps() => serverTPS;
+        public override int GetPacketCount() => packetCount;
+        public override int GetClientEntityId() => _clientEntitySpawn.Id;
+        public override double GetClientFoodSaturation() => currentHunger;
+        public override double GetClientExperienceLevel() => experienceLevel;
+        public override double GetClientTotalExperience() => totalExperience;
+
+        public override float GetTickMilSec() => (float)(1000D / averageTPS);
+
+        /// <summary>
+        /// Get player inventory with a given id
+        /// </summary>
+        public override InventoryData? GetInventory(int inventoryId)
+        {
+            return inventories.GetValueOrDefault(inventoryId);
+        }
+
+        /// <summary>
+        /// Get item stack held by client player
+        /// </summary>
+        public override ItemStack? GetActiveItem()
+        {
+            return GetInventory(0)?.GetHotbarItem(CurrentHotbarSlot);
+        }
+
+        /// <summary>
+        /// Get current player location (in Minecraft world)
+        /// </summary>
+        public override Location GetCurrentLocation()
+        {
+            return PlayerController.Location2Send;
+        }
+
+        /// <summary>
+        /// Get current player position (in Unity scene)
+        /// </summary>
+        public override Vector3 GetPosition()
+        {
+            //return CoordConvert.MC2Unity(PlayerController.Location2Send);
+            return PlayerController.transform.position;
+        }
+
+        /// <summary>
+        /// Get current camera yaw
+        /// </summary>
+        public override float GetCameraYaw()
+        {
+            return CameraController.GetYaw();
+        }
+
+        /// <summary>
+        /// Get current camera pitch
+        /// </summary>
+        public override float GetCameraPitch()
+        {
+            return CameraController.GetPitch();
+        }
+
+        /// <summary>
+        /// Get current status about the client
+        /// </summary>
+        /// <returns>Status info string</returns>
+        public override string GetInfoString(bool withDebugInfo)
+        {
+            var baseString = $"FPS: {Mathf.Round(1F / Time.deltaTime), 4}\n{GameMode}\nTime: {EnvironmentManager.GetTimeString()}";
+
+            if (withDebugInfo)
+            {
+                // Light debugging
+                var playerBlockLoc = GetCurrentLocation().GetBlockLoc();
+
+                var dimensionId = ChunkRenderManager.GetDimensionId();
+                var biomeId = ChunkRenderManager.GetBiome(playerBlockLoc).BiomeId;
+
+                // Ray casting debugging
+                string targetBlockInfo, targetFluidInfo;
+
+                if (interactionUpdater.TargetBlockLoc is not null)
+                {
+                    var targetBlockLoc = interactionUpdater.TargetBlockLoc.Value;
+                    var targetDirection = interactionUpdater.TargetDirection!.Value;
+                    var targetBlock = ChunkRenderManager.GetBlock(targetBlockLoc);
+                    var targetTags = string.Join(", ", GroupTag.GetTagsForObject("block", targetBlock.State.BlockId));
+                    targetBlockInfo = $"Target Block: {targetBlockLoc} ({targetDirection}) {targetBlock.State} Tags: {targetTags}";
+                }
+                else
+                {
+                    targetBlockInfo = string.Empty;
+                }
+
+                if (interactionUpdater.TargetFluidLoc is not null)
+                {
+                    var targetFluidLoc = interactionUpdater.TargetFluidLoc.Value;
+                    var targetFluid = ChunkRenderManager.GetBlock(targetFluidLoc);
+                    targetFluidInfo = $"Target Fluid: {targetFluidLoc} {targetFluid.State.FluidStateId} (Level: {targetFluid.State.LiquidLevel})";
+                }
+                else
+                {
+                    targetFluidInfo = string.Empty;
+                }
+
+                return baseString + $"\nLoc: {GetCurrentLocation()}\n{PlayerController.GetDebugInfo()}\nDimension: {dimensionId}\nBiome: {biomeId}\n{targetBlockInfo}\n{targetFluidInfo}\nWorld Origin Offset: {WorldOriginOffset}" +
+                        $"\n{ChunkRenderManager.GetDebugInfo()}\n{EntityRenderManager.GetDebugInfo()}\nServer TPS: {GetLatestServerTps():0.0} (Avg: {GetServerAverageTps():0.0})";
+            }
+            
+            return baseString;
+        }
+
+        /// <summary>
+        /// Get all players latency
+        /// </summary>
+        public override Dictionary<string, int> GetPlayersLatency()
+        {
+            lock (onlinePlayers)
+            {
+                return onlinePlayers.ToDictionary(player => player.Value.Name, player => player.Value.Ping);
+            }
+        }
+
+        /// <summary>
+        /// Get latency for current player
+        /// </summary>
+        public override int GetOwnLatency()
+        {
+            lock (onlinePlayers)
+            {
+                return onlinePlayers.TryGetValue(uuid, out var selfPlayer) ? selfPlayer.Ping : 0;
+            }
+        }
+
+        /// <summary>
+        /// Get player info from uuid
+        /// </summary>
+        /// <param name="targetUUID">Player's UUID</param>
+        public override PlayerInfo? GetPlayerInfo(Guid targetUUID)
+        {
+            lock (onlinePlayers)
+            {
+                return onlinePlayers.GetValueOrDefault(targetUUID);
+            }
+        }
+        
+        /// <summary>
+        /// Get a set of online player names
+        /// </summary>
+        /// <returns>Online player names</returns>
+        public override string[] GetOnlinePlayers()
+        {
+            lock (onlinePlayers)
+            {
+                var playerNames = new string[onlinePlayers.Count];
+                var idx = 0;
+                foreach (var player in onlinePlayers)
+                    playerNames[idx++] = player.Value.Name;
+                return playerNames;
+            }
+        }
+
+        /// <summary>
+        /// Get a dictionary of online player names and their corresponding UUID
+        /// </summary>
+        /// <returns>Dictionary of online players, key is UUID, value is Player name</returns>
+        public override Dictionary<string, string> GetOnlinePlayersWithUUID()
+        {
+            var uuid2Player = new Dictionary<string, string>();
+            lock (onlinePlayers)
+            {
+                foreach (var key in onlinePlayers.Keys)
+                {
+                    uuid2Player.Add(key.ToString(), onlinePlayers[key].Name);
+                }
+            }
+            return uuid2Player;
+        }
+
+        #endregion
+
+        #region Action methods: Perform an action on the server
+
+        public void SetCanSendMessage(bool canSend)
+        {
+            lock (chatQueue)
+            {
+                canSendMessage = canSend;
+            }
+        }
+
+        /// <summary>
+        /// Allows the user to send chat messages, commands, and leave the server.
+        /// </summary>
+        public override void TrySendChat(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return;
+            try
+            {
+                InvokeOnNetMainThreadAsync(() => SendChat(text));
+            }
+            catch (IOException) { }
+            catch (NullReferenceException) { }
+        }
+
+        /// <summary>
+        /// Send a chat message or command to the server
+        /// </summary>
+        /// <param name="text">Text to send to the server</param>
+        private void SendChat(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return;
+
+            var maxLength = handler!.GetMaxChatMessageLength();
+
+            lock (chatQueue)
+            {
+                if (text.Length > maxLength) // Message is too long?
+                {
+                    if (text[0] == '/')
+                    {
+                        // Send the first 100/256 chars of the command
+                        text = text[..maxLength];
+                    }
+                    else
+                    {
+                        // Split the message into several messages
+                        while (text.Length > maxLength)
+                        {
+                            chatQueue.Enqueue(text[..maxLength]);
+                            text = text[maxLength..];
+                        }
+                    }
+                }
+
+                chatQueue.Enqueue(text);
+                TrySendMessageToServer();
+            }
+        }
+
+        /// <summary>
+        /// Allow to respawn after death
+        /// </summary>
+        /// <returns>True if packet successfully sent</returns>
+        public override bool SendRespawnPacket()
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(SendRespawnPacket);
+                return true;
+            }
+
+            return handler!.SendRespawnPacket();
+        }
+
+        /// <summary>
+        /// Send the Entity Action packet with the Specified Id
+        /// </summary>
+        /// <returns>TRUE if the item was successfully used</returns>
+        public override bool SendEntityAction(EntityActionType entityAction)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => SendEntityAction(entityAction));
+                return true;
+            }
+
+            return handler!.SendEntityAction(_clientEntitySpawn.Id, (int) entityAction);
+        }
+
+        /// <summary>
+        /// Allows the user to send requests to complete current command
+        /// </summary>
+        public override void SendAutoCompleteRequest(string text)
+        {
+            // We shouldn't trim the string here because spaces here really matter
+            // For example, auto completing '/gamemode ' returns the game modes as
+            // the result options while passing in '/gamemode' yields nothing...
+            try
+            {
+                _ = InvokeOnNetMainThreadAsync(() => handler!.SendAutoCompleteText(text));
+            }
+            catch (IOException) { }
+            catch (NullReferenceException) { }
+        }
+
+        /// <summary>
+        /// Use the item currently in the player's main hand
+        /// </summary>
+        /// <returns>TRUE if the item was successfully used</returns>
+        public override bool UseItemOnMainHand()
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(UseItemOnMainHand);
+                return true;
+            }
+
+            return handler!.SendUseItem(0, sequenceId++);
+        }
+
+        /// <summary>
+        /// Use the item currently in the player's off hand
+        /// </summary>
+        /// <returns>TRUE if the item was successfully used</returns>
+        public override bool UseItemOnOffHand()
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(UseItemOnOffHand);
+                return true;
+            }
+
+            return handler!.SendUseItem(1, sequenceId++);
+        }
+        
+        /// <summary>
+        /// Pick item (middle click)
+        /// </summary>
+        /// <returns>TRUE if the item was successfully picked</returns>
+        public override bool PickItem(int slotToUse)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => PickItem(slotToUse));
+                return true;
+            }
+
+            return handler!.SendPickItem(slotToUse);
+        }
+
+        /// <summary>
+        /// Open player inventory, doesn't actually send anything to the server
+        /// </summary>
+        public override void OpenPlayerInventory()
+        {
+            if (InvokeRequired)
+            {
+                InvokeOnNetMainThreadAsync(OpenPlayerInventory);
+                return;
+            }
+            
+            var playerInventory = inventories.GetValueOrDefault(0);
+            if (playerInventory is null)
+            {
+                Debug.LogWarning("Player inventory data is not available!");
+            }
+            else
+            {
+                OnInventoryOpen(0, playerInventory);
+            }
+        }
+
+        /// <summary>
+        /// Click a slot in the specified inventory
+        /// </summary>
+        /// <returns>TRUE if the slot was successfully clicked</returns>
+        public override bool DoInventoryAction(int inventoryId, int slot, InventoryActionType actionType)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => DoInventoryAction(inventoryId, slot, actionType));
+                return true;
+            }
+
+            ItemStack? sendItem = null;
+            //if (inventories.ContainsKey(inventoryId) && inventories[inventoryId].Items.TryGetValue(slot, out var iii))
+            //{
+            //    sendItem = new(iii.ItemType, iii.Count, iii.NBT);
+            //}
+            //if (inventories[0].Items.TryGetValue(slot, out var iii))
+            //{
+            //    sendItem = new(iii.ItemType, iii.Count, iii.NBT);
+            //}
+            
+            List<Tuple<short, ItemStack?>> changedSlots = new(); // List<Slot Id, Changed Items>
+
+            // Update our inventory base on action type
+            var inventory = GetInventory(inventoryId);
+            var playerInventory = GetInventory(0)!;
+            
+            if (inventory != null)
+            {
+                var inventoryType = inventory.Type;
+                var slotInfo = inventoryType.GetWorkPanelSlotInfo(slot);
+                var slotType = InventorySlotTypePalette.INSTANCE.GetById(slotInfo.TypeId);
+
+                if (!slotType.Interactable)
+                {
+                    return false; // Not interactable at all
+                }
+
+                var placePredicate = slotType.PlacePredicate;
+                
+                switch (actionType)
+                {
+                    case InventoryActionType.LeftClick:
+                        // Check if cursor have item (slot -1)
+                        if (playerInventory.Items.TryGetValue(-1, out var cursor1))
+                        {
+                            // Check target slot also have item
+                            if (inventory.Items.TryGetValue(slot, out var target1))
+                            {
+                                // Check if items are stackable?
+                                if (InventoryData.CheckStackable(target1, cursor1))
+                                {
+                                    var maxCount = Mathf.Min(target1.MaxStackSize, slotType.MaxCount);
+                                    
+                                    // Check item stacking
+                                    if (target1.Count + cursor1.Count <= maxCount)
+                                    {
+                                        if (slotType.TypeId == InventorySlotType.SLOT_TYPE_OUTPUT_ID)
+                                        {
+                                            // Stack target to cursor
+                                            cursor1.Count += target1.Count;
+                                            inventory.Items.Remove(slot);
+                                            if (ProtocolSettings.DebugMode)
+                                                Debug.Log($"[LeftClick] [{slot}] Stack target (output) to cursor [{cursor1}]");
+                                        }
+                                        else
+                                        {
+                                            // Stack cursor to target
+                                            target1.Count += cursor1.Count;
+                                            playerInventory.Items.Remove(-1);
+                                            if (ProtocolSettings.DebugMode)
+                                                Debug.Log($"[LeftClick] [{slot}] Stack cursor to target [{target1}]");
+                                        }
+                                    }
+                                    else
+                                    {
+                                        if (slotType.TypeId == InventorySlotType.SLOT_TYPE_OUTPUT_ID)
+                                        {
+                                            if (ProtocolSettings.DebugMode)
+                                                Debug.Log($"[LeftClick] [{slot}] Cannot stack target (output) to cursor");
+                                            
+                                            return false; // Interaction not valid
+                                        }
+                                        // Leave some item on cursor
+                                        cursor1.Count -= maxCount - target1.Count;
+                                        target1.Count = maxCount;
+                                        if (ProtocolSettings.DebugMode)
+                                            Debug.Log($"[LeftClick] [{slot}] Stack cursor to target [{target1}], and leave some on cursor [{cursor1}]");
+                                    }
+                                }
+                                else // Not stackable, swap
+                                {
+                                    if (!placePredicate(cursor1) || cursor1.Count > slotType.MaxCount)
+                                    {
+                                        if (ProtocolSettings.DebugMode)
+                                            Debug.Log($"[LeftClick] [{slot}] Cannot swap target with cursor");
+                                        
+                                        return false; // Interaction not valid
+                                    }
+                                    // Swap two items
+                                    (inventory.Items[slot], playerInventory.Items[-1]) = (cursor1, target1);
+                                    if (ProtocolSettings.DebugMode)
+                                        Debug.Log($"[LeftClick] [{slot}] Swap target [{target1}] with cursor [{cursor1}]");
+                                }
+                            }
+                            else // Target has no item
+                            {
+                                if (!placePredicate(cursor1))
+                                {
+                                    if (ProtocolSettings.DebugMode)
+                                        Debug.Log($"[LeftClick] [{slot}] Cannot put cursor to target");
+                                    
+                                    return false; // Interaction not valid
+                                }
+                                var maxCount = slotType.MaxCount;
+
+                                if (cursor1.Count <= maxCount)
+                                {
+                                    // Put cursor item to target
+                                    inventory.Items[slot] = cursor1;
+                                    playerInventory.Items.Remove(-1);
+                                    if (ProtocolSettings.DebugMode)
+                                        Debug.Log($"[LeftClick] [{slot}] Put cursor to target [{inventory.Items[slot]}]");
+                                }
+                                else
+                                {
+                                    // Leave some item on cursor
+                                    cursor1.Count -= maxCount;
+                                    inventory.Items[slot] = new ItemStack(cursor1, maxCount);
+                                    if (ProtocolSettings.DebugMode)
+                                        Debug.Log($"[LeftClick] [{slot}] Put cursor to target [{target1}], and leave some on cursor [{cursor1}]");
+                                }
+                            }
+
+                            changedSlots.Add(inventory.Items.TryGetValue(slot, out var inventoryItem)
+                                ? new Tuple<short, ItemStack?>((short)slot, inventoryItem)
+                                : new Tuple<short, ItemStack?>((short)slot, null));
+                        }
+                        else // Cursor has no item
+                        {
+                            // Check target slot have item?
+                            if (inventory.Items.ContainsKey(slot))
+                            {
+                                // Put target slot item to cursor
+                                playerInventory.Items[-1] = inventory.Items[slot];
+                                inventory.Items.Remove(slot);
+                                changedSlots.Add(new Tuple<short, ItemStack?>((short)slot, null));
+                                if (ProtocolSettings.DebugMode)
+                                    Debug.Log($"[LeftClick] [{slot}] Put target to cursor [{playerInventory.Items[-1]}]");
+                            }
+                            else // Target has no item
+                            {
+                                if (ProtocolSettings.DebugMode)
+                                    Debug.Log($"[LeftClick] [{slot}] Do nothing");
+                                
+                                return false; // Interaction not valid
+                            }
+                        }
+                        break;
+                    case InventoryActionType.RightClick:
+                        // Check if cursor have item (slot -1)
+                        if (playerInventory.Items.TryGetValue(-1, out var cursor2))
+                        {
+                            // Check target slot also have item
+                            if (inventory.Items.TryGetValue(slot, out var target2))
+                            {
+                                var maxCount = Mathf.Min(target2.MaxStackSize, slotType.MaxCount);
+
+                                // Check if these 2 items are stackable
+                                if (InventoryData.CheckStackable(target2, cursor2))
+                                {
+                                    if (slotType.TypeId == InventorySlotType.SLOT_TYPE_OUTPUT_ID)
+                                    {
+                                        if (target2.Count + cursor2.Count <= maxCount)
+                                        {
+                                            // Stack target to cursor
+                                            cursor2.Count += target2.Count;
+                                            inventory.Items.Remove(slot);
+                                            if (ProtocolSettings.DebugMode)
+                                                Debug.Log($"[RightClick] [{slot}] Stack target (output) to cursor [{cursor2}]");
+                                        }
+                                        else
+                                        {
+                                            if (ProtocolSettings.DebugMode)
+                                                Debug.Log($"[RightClick] [{slot}] Target (output) cannot be stacked anymore");
+                                            
+                                            return false; // Interaction not valid
+                                        }
+                                    }
+                                    else if (target2.Count + 1 <= maxCount)
+                                    {
+                                        // Drop 1 item count from cursor
+                                        cursor2.Count--;
+                                        target2.Count++;
+                                        if (cursor2.Count <= 0) playerInventory.Items.Remove(-1);
+                                        if (ProtocolSettings.DebugMode)
+                                            Debug.Log($"[RightClick] [{slot}] Drop cursor [{cursor2}] to target[{target2}]");
+                                    }
+                                }
+                                else // Not stackable, swap
+                                {
+                                    if (!placePredicate(cursor2) || cursor2.Count > slotType.MaxCount)
+                                    {
+                                        if (ProtocolSettings.DebugMode)
+                                            Debug.Log($"[RightClick] [{slot}] Cannot swap target (output) with cursor");
+                                        
+                                        return false; // Interaction not valid
+                                    }
+                                    // Swap two items
+                                    (inventory.Items[slot], playerInventory.Items[-1]) = (cursor2, target2);
+                                    if (ProtocolSettings.DebugMode)
+                                        Debug.Log($"[RightClick] [{slot}] Swap target [{target2}] with cursor [{cursor2}]");
+                                }
+                            }
+                            else // Target has no item
+                            {
+                                if (!placePredicate(cursor2) || 1 > slotType.MaxCount)
+                                {
+                                    if (ProtocolSettings.DebugMode)
+                                        Debug.Log($"[RightClick] [{slot}] Cannot drop 1 cursor to target");
+                                    
+                                    return false; // Interaction not valid
+                                }
+                                var maxCount = slotType.MaxCount;
+
+                                if (1 <= maxCount)
+                                {
+                                    // Drop 1 item count from cursor
+                                    ItemStack itemClone = new(cursor2, 1);
+                                    inventory.Items[slot] = itemClone;
+                                    cursor2.Count--;
+                                    if (cursor2.Count <= 0) playerInventory.Items.Remove(-1);
+                                    if (ProtocolSettings.DebugMode)
+                                        Debug.Log($"[RightClick] [{slot}] Drop 1 cursor [{cursor2}] to target [{inventory.Items[slot]}]");
+                                }
+                                else
+                                {
+                                    if (ProtocolSettings.DebugMode)
+                                        Debug.Log($"[RightClick] [{slot}] Cannot drop 1 cursor to target");
+                                    
+                                    return false; // Interaction not valid
+                                }
+                            }
+                        }
+                        else // Cursor has no item
+                        {
+                            // Check target slot have item?
+                            if (inventory.Items.TryGetValue(slot, out var target2))
+                            {
+                                if (slotType.TypeId == InventorySlotType.SLOT_TYPE_OUTPUT_ID)
+                                {
+                                    // You can't take half from an output slot, put entire item stack from target to cursor
+                                    playerInventory.Items[-1] = inventory.Items[slot];
+                                    inventory.Items.Remove(slot);
+                                    changedSlots.Add(new Tuple<short, ItemStack?>((short)slot, null));
+                                    if (ProtocolSettings.DebugMode)
+                                        Debug.Log($"[RightClick] [{slot}] Put target (output) to cursor [{playerInventory.Items[-1]}]");
+                                }
+                                else // Take half of the item stack
+                                {
+                                    if (target2.Count == 1)
+                                    {
+                                        // Only 1 item. Put it to cursor
+                                        playerInventory.Items[-1] = inventory.Items[slot];
+                                        inventory.Items.Remove(slot);
+                                        if (ProtocolSettings.DebugMode)
+                                            Debug.Log($"[RightClick] [{slot}] Take 1 target [{target2}] to cursor [{cursor2}]");
+                                    }
+                                    else
+                                    {
+                                        // Take half of the item stack to cursor
+                                        if (inventory.Items[slot].Count % 2 == 0)
+                                        {
+                                            // Can be evenly divided
+                                            var itemTmp = inventory.Items[slot];
+                                            playerInventory.Items[-1] = new ItemStack(itemTmp, itemTmp.Count / 2);
+                                            inventory.Items[slot].Count = itemTmp.Count / 2;
+                                            if (ProtocolSettings.DebugMode)
+                                                Debug.Log($"[RightClick] [{slot}] Take half(even) target [{target2}] to cursor [{cursor2}]");
+                                        }
+                                        else
+                                        {
+                                            // Cannot be evenly divided. item count on cursor is always larger than item on inventory
+                                            var itemTmp = inventory.Items[slot];
+                                            playerInventory.Items[-1] = new ItemStack(itemTmp, (itemTmp.Count + 1) / 2);
+                                            inventory.Items[slot].Count = (itemTmp.Count - 1) / 2;
+                                            if (ProtocolSettings.DebugMode)
+                                                Debug.Log($"[RightClick] [{slot}] Take half(odd) target [{target2}] to cursor [{cursor2}]");
+                                        }
+                                    }
+                                }
+                            }
+                            else // Target has no item
+                            {
+                                if (ProtocolSettings.DebugMode)
+                                    Debug.Log($"[RightClick] [{slot}] Do nothing");
+                                
+                                return false; // Interaction not valid
+                            }
+                        }
+
+                        changedSlots.Add(new Tuple<short, ItemStack?>((short)slot,
+                            inventory.Items.GetValueOrDefault(slot)));
+                        break;
+                    case InventoryActionType.ShiftClick:
+                    case InventoryActionType.ShiftRightClick:
+                        // TODO: Implement
+                        break;
+                    case InventoryActionType.DropItem:
+                        if (inventory.Items.TryGetValue(slot, out var stack2Drop1))
+                        {
+                            stack2Drop1.Count--;
+                            if (stack2Drop1.Count <= 0)
+                            {
+                                inventory.Items.Remove(slot);
+                                changedSlots.Add(new Tuple<short, ItemStack?>((short)slot, null));
+                            }
+                            else
+                            {
+                                changedSlots.Add(new Tuple<short, ItemStack?>((short)slot, stack2Drop1));
+                            }
+                        }
+                        break;
+                    case InventoryActionType.DropItemStack:
+                        inventory.Items.Remove(slot);
+                        changedSlots.Add(new Tuple<short, ItemStack?>((short)slot, null));
+                        break;
+                    case InventoryActionType.StartDragLeft: // Distribute evenly
+                    case InventoryActionType.StartDragRight: // Drop 1 in each
+                        draggedSlots.Clear();
+                        dragStartCursorItemClone = null;
+
+                        // Check if cursor have item (slot -1) and update dragging status
+                        if (playerInventory.Items.TryGetValue(-1, out var cursor7))
+                        {
+                            if (ProtocolSettings.DebugMode)
+                                Debug.Log($"[{actionType}] Start from [{slot}]. Cursor item {cursor7}");
+                            dragStartCursorItemClone = new(cursor7, cursor7.Count);
+                            dragging = true;
+                        }
+                        else
+                        {
+                            if (ProtocolSettings.DebugMode)
+                                Debug.LogWarning($"[{actionType}] Cursor slot shouldn't be empty!");
+                            dragging = false;
+                            return false;
+                        }
+                        break;
+                    case InventoryActionType.AddDragLeft:
+                    case InventoryActionType.AddDragRight:
+                        if (!dragging || draggedSlots.ContainsKey(slot)) return false;
+                        if (ProtocolSettings.DebugMode)
+                            Debug.Log($"[{actionType}] Add dragged slot [{slot}]");
+                        
+                        var target8 = inventory.Items.GetValueOrDefault(slot);
+                        draggedSlots[slot] = target8?.Count ?? 0; // Initial count is 0 if the slot is empty
+                        
+                        var stackMax = dragStartCursorItemClone.MaxStackSize;
+                        var initCursorCount = dragStartCursorItemClone.Count;
+                        
+                        var maxAllocForEachSlot = actionType switch
+                        {
+                            InventoryActionType.AddDragLeft => initCursorCount / draggedSlots.Count,
+                            InventoryActionType.AddDragRight => 1,
+                            _ => throw new ArgumentOutOfRangeException(nameof(actionType), actionType, null)
+                        };
+                        var actualAllocationTotal = 0;
+                        
+                        // Increase item count in each of the dragged slots
+                        foreach (var (draggedSlot, initCount) in draggedSlots)
+                        {
+                            if (stackMax <= initCount) continue; // Full stack already
+                            
+                            var actualAllocation = Mathf.Min(stackMax - initCount, maxAllocForEachSlot);
+                            actualAllocationTotal += actualAllocation;
+                            if (ProtocolSettings.DebugMode)
+                                Debug.Log($"Dragged slot [{draggedSlot}] {initCount} +{actualAllocation} => {initCount + actualAllocation}");
+                            if (inventory.Items.TryGetValue(draggedSlot, out target8))
+                            {
+                                target8.Count = initCount + actualAllocation;
+                            }
+                            else
+                            {
+                                inventory.Items[draggedSlot] = new ItemStack(dragStartCursorItemClone, actualAllocation);
+                            }
+                            changedSlots.Add(new Tuple<short, ItemStack?>((short) draggedSlot, inventory.Items[draggedSlot]));
+                        }
+                        
+                        // And reduce the item count in cursor slot
+                        if (actualAllocationTotal == initCursorCount) // All items put into dragged slots, nothing left on cursor
+                        {
+                            playerInventory.Items.Remove(-1);
+                        }
+                        else if (actualAllocationTotal > initCursorCount) // Emm... We've got a problem here
+                        {
+                            if (ProtocolSettings.DebugMode)
+                                Debug.LogWarning($"[{actionType}] WTF? Allocating {actualAllocationTotal} items out of a total of {dragStartCursorItemClone.Count}!");
+                        }
+                        else if (playerInventory.Items.TryGetValue(-1, out var cursor8)) // Reduce cursor count
+                        {
+                            cursor8.Count = dragStartCursorItemClone.Count - actualAllocationTotal;
+                        }
+                        else // Previous allocation used up all the item, recreate an item stack on cursor
+                        {
+                            playerInventory.Items[-1] = new ItemStack(dragStartCursorItemClone, initCursorCount - actualAllocationTotal);
+                        }
+                        if (ProtocolSettings.DebugMode)
+                            Debug.Log($"Cursor slot {initCursorCount} -{actualAllocationTotal} => {initCursorCount - actualAllocationTotal}");
+                        break;
+                    case InventoryActionType.EndDragLeft:
+                    case InventoryActionType.EndDragRight:
+                        if (!dragging) return false;
+                        dragging = false;
+                        if (ProtocolSettings.DebugMode)
+                            Debug.Log($"[{actionType}] End");
+                        
+                        break;
+                    case InventoryActionType.LeftClickDropOutside:
+                        inventory.Items.Remove(-1);
+                        changedSlots.Add(new Tuple<short, ItemStack?>(-1, null));
+                        break;
+                    case InventoryActionType.RightClickDropOutside:
+                        if (inventory.Items.TryGetValue(-1, out var stack2Drop2))
+                        {
+                            stack2Drop2.Count--;
+                            if (stack2Drop2.Count <= 0)
+                            {
+                                inventory.Items.Remove(-1);
+                                changedSlots.Add(new Tuple<short, ItemStack?>(-1, null));
+                            }
+                            else
+                            {
+                                changedSlots.Add(new Tuple<short, ItemStack?>(-1, stack2Drop2));
+                            }
+                        }
+                        break;
+                    case InventoryActionType.MiddleClick:
+                    case InventoryActionType.StartDragMiddle:
+                    case InventoryActionType.AddDragMiddle:
+                    case InventoryActionType.EndDragMiddle:
+                    default:
+                        if (ProtocolSettings.DebugMode)
+                            Debug.LogWarning($"Inventory action not handled: {actionType}");
+                        break;
+                }
+            }
+            else
+            {
+                return false;
+            }
+
+            foreach (var (slotId, slotItem) in changedSlots) // Update local data for each changed slot
+            {
+                EventManager.Instance.BroadcastOnUnityThread(new InventorySlotUpdateEvent(inventoryId, slotId, slotItem, true));
+
+                if (inventory.IsBackpack(slotId, out var backpackSlot)) // Update backpack slots in player inventory
+                {
+                    var slotInPlayerInventory = playerInventory.GetFirstBackpackSlot() + backpackSlot;
+                    if (slotItem is null)
+                        playerInventory.Items.Remove(slotInPlayerInventory);
+                    else
+                        playerInventory.Items[slotInPlayerInventory] = slotItem;
+                }
+                
+                if (inventory.IsHotbar(slotId, out var hotbarSlot)) // Update hotbar slots in player inventory
+                {
+                    var slotInPlayerInventory = playerInventory.GetFirstHotbarSlot() + hotbarSlot;
+                    if (slotItem is null)
+                        playerInventory.Items.Remove(slotInPlayerInventory);
+                    else
+                        playerInventory.Items[slotInPlayerInventory] = slotItem;
+                    
+                    EventManager.Instance.BroadcastOnUnityThread(new HotbarSlotUpdateEvent(hotbarSlot, slotItem));
+
+                    if (hotbarSlot == CurrentHotbarSlot) // The currently held item is updated
+                    {
+                        EventManager.Instance.BroadcastOnUnityThread(new HeldItemUpdateEvent(hotbarSlot, Hand.MainHand,
+                            false, slotItem, PlayerActionHelper.GetItemActionType(slotItem)));
+                    }
+                }
+            }
+            var cursorItem = playerInventory.Items.GetValueOrDefault(-1);
+            var stateId = inventory.StateId;
+
+            sendItem = cursorItem;
+            
+            //Debug.Log($"Changed slots: {string.Join(", ", changedSlots.Select(x => $"[{x.Item1}] {x.Item2}"))}, Cursor item: {cursorItem}, Send item: {sendItem}, State id: {stateId}");
+            EventManager.Instance.BroadcastOnUnityThread(new InventorySlotUpdateEvent(inventoryId, -1, cursorItem, true));
+
+            return handler!.SendInventoryAction(inventoryId, slot, actionType, sendItem, changedSlots, stateId);
+        }
+        
+        /// <summary>
+        /// Click a button in the specified inventory
+        /// </summary>
+        /// <returns>TRUE if the button was successfully clicked</returns>
+        public override bool DoInventoryButtonClick(int inventoryId, int buttonId)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => DoInventoryButtonClick(inventoryId, buttonId));
+                return true;
+            }
+
+            return handler!.SendInventoryButtonClick(inventoryId, buttonId);
+        }
+
+        /// <summary>
+        /// Give Creative Mode items into regular/survival Player Inventory
+        /// </summary>
+        /// <remarks>(obviously) requires to be in creative mode</remarks>
+        /// <param name="slot">Destination inventory slot</param>
+        /// <param name="itemType">Item type</param>
+        /// <param name="count">Item count</param>
+        /// <param name="nbt">Item NBT</param>
+        /// <returns>TRUE if item given successfully</returns>
+        public override bool DoCreativeGive(int slot, Item itemType, int count, Dictionary<string, object>? nbt = null)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => DoCreativeGive(slot, itemType, count, nbt));
+                return true;
+            }
+
+            return handler!.SendCreativeInventoryAction(slot, itemType, count, nbt);
+        }
+
+        /// <summary>
+        /// Plays animation (Player arm swing)
+        /// </summary>
+        /// <param name="playerAnimation">0 for left arm, 1 for right arm</param>
+        /// <returns>TRUE if animation successfully done</returns>
+        public override bool DoAnimation(int playerAnimation)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => DoAnimation(playerAnimation));
+                return true;
+            }
+
+            return handler!.SendAnimation(playerAnimation, _clientEntitySpawn.Id);
+        }
+        
+        /// <summary>
+        /// Set anvil rename text
+        /// </summary>
+        /// <param name="newName">New name for item</param>
+        /// <returns>TRUE if new name successfully set</returns>
+        public override bool SetAnvilRenameText(string newName)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => SetAnvilRenameText(newName));
+                return true;
+            }
+
+            return handler!.SendRenameItem(newName);
+        }
+
+        /// <summary>
+        /// Set beacon effects
+        /// </summary>
+        /// <param name="primary">Primary effect num id</param>
+        /// <param name="secondary">Secondary effect num id</param>
+        /// <returns>TRUE if effects successfully set</returns>
+        public override bool SetBeaconEffects(int primary, int secondary)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => SetBeaconEffects(primary, secondary));
+                return true;
+            }
+
+            return handler!.SendBeaconEffects(primary, secondary);
+        }
+
+        /// <summary>
+        /// Close the specified inventory
+        /// </summary>
+        /// <param name="inventoryId">Inventory Id</param>
+        /// <returns>TRUE if the inventory was successfully closed</returns>
+        /// <remarks>Sending close inventory for inventory 0 can cause server to update our inventory if there are any item in the crafting area</remarks>
+        public override bool CloseInventory(int inventoryId)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => CloseInventory(inventoryId));
+                return true;
+            }
+
+            if (inventories.ContainsKey(inventoryId))
+            {
+                if (inventoryId != 0)
+                    inventories.Remove(inventoryId);
+                return handler!.SendCloseInventory(inventoryId);
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Clean all inventory
+        /// </summary>
+        /// <returns>TRUE if the successfully cleared</returns>
+        public override bool ClearInventories()
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(ClearInventories);
+                return true;
+            }
+
+            inventories.Clear();
+            inventories[0] = new InventoryData(0, InventoryTypePalette.INSTANCE.PLAYER,
+                ChatParser.TranslateString("container.inventory"));
+            return true;
+        }
+        
+        /// <summary>
+        /// Update sign text
+        /// </summary>
+        /// <param name="blockLoc">Sign location</param>
+        /// <param name="isFrontText">Update front text</param>
+        /// <param name="line1">Line 1</param>
+        /// <param name="line2">Line 2</param>
+        /// <param name="line3">Line 3</param>
+        /// <param name="line4">Line 4</param>
+        public override bool UpdateSign(BlockLoc blockLoc, bool isFrontText, string line1,
+            string line2, string line3, string line4)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() =>
+                    UpdateSign(blockLoc, isFrontText, line1, line2, line3, line4));
+                return true;
+            }
+
+            return handler!.SendUpdateSign(blockLoc, isFrontText, line1, line2, line3, line4);
+        }
+
+        /// <summary>
+        /// Interact with an entity
+        /// </summary>
+        /// <param name="entityId"></param>
+        /// <param name="type">0: interact, 1: attack, 2: interact at</param>
+        /// <param name="hand">Hand.MainHand or Hand.OffHand</param>
+        /// <returns>TRUE if interaction succeeded</returns>
+        public override bool InteractEntity(int entityId, int type, Hand hand = Hand.MainHand)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => InteractEntity(entityId, type, hand));
+                return true;
+            }
+
+            if (EntityRenderManager.HasEntityRender(entityId))
+            {
+                return type == 0 ?
+                    handler!.SendInteractEntity(entityId, type, (int) hand) :
+                    handler!.SendInteractEntity(entityId, type);
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Place the block at hand in the Minecraft world
+        /// </summary>
+        /// <param name="blockLoc">Location to place block to</param>
+        /// <param name="blockFace">Block face (e.g. Direction.Down when clicking on the block below to place this block)</param>
+        /// <param name="x">Block x</param>
+        /// <param name="y">Block y</param>
+        /// <param name="z">Block z</param>
+        /// <param name="hand">Hand to use</param>
+        /// <returns>TRUE if successfully placed</returns>
+        public override bool PlaceBlock(BlockLoc blockLoc, Direction blockFace, float x, float y, float z, Hand hand = Hand.MainHand)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => PlaceBlock(blockLoc, blockFace, x, y, z));
+                return true;
+            }
+
+            return handler!.SendPlayerBlockPlacement((int)hand, blockLoc, x, y, z, blockFace, sequenceId++);
+        }
+
+        /// <summary>
+        /// Attempt to dig a block at the specified location
+        /// </summary>
+        /// <param name="blockLoc">Location of block to dig</param>
+        /// <param name="blockFace">Block face</param>
+        /// <param name="status">Digging status</param>
+        public override bool DigBlock(BlockLoc blockLoc, Direction blockFace, DiggingStatus status)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => DigBlock(blockLoc, blockFace, status));
+                return true;
+            }
+
+            return status switch
+            {
+                DiggingStatus.Started => handler!.SendPlayerDigging(0, blockLoc, blockFace, sequenceId++),
+                DiggingStatus.Cancelled => handler!.SendPlayerDigging(1, blockLoc, blockFace, sequenceId++),
+                DiggingStatus.Finished => handler!.SendPlayerDigging(2, blockLoc, blockFace, sequenceId++),
+                _ => false
+            };
+        }
+
+        /// <summary>
+        /// Drop item in active hotbar slot
+        /// </summary>
+        /// <param name="dropEntireStack">Whether or not to drop the entire item stack</param>
+        public override bool DropItem(bool dropEntireStack)
+        {
+            if (GameMode == GameMode.Spectator) return false;
+
+            var curItem = inventories[0].GetHotbarItem(CurrentHotbarSlot);
+            if (curItem == null || curItem.IsEmpty)
+            {
+                return false;
+            }
+
+            var sent = handler!.SendPlayerAction(dropEntireStack ? 3 : 4);
+            if (sent) // Do update on client side
+            {
+                ItemStack? updatedItem;
+
+                if (dropEntireStack || curItem.Count <= 1)
+                {
+                    updatedItem = null; // Nothing left in slot
+                    if (ProtocolSettings.DebugMode)
+                        Debug.Log($"Dropped every {curItem.ItemType.ItemId} in hotbar slot {CurrentHotbarSlot}.");
+                }
+                else
+                {
+                    updatedItem = new ItemStack(curItem, curItem.Count - 1);
+                    if (ProtocolSettings.DebugMode)
+                        Debug.Log($"Dropped a single {curItem.ItemType.ItemId} in hotbar slot {CurrentHotbarSlot}, {updatedItem.Count} left.");
+                }
+
+                var invSlot = inventories[0].GetFirstHotbarSlot() + CurrentHotbarSlot;
+                if (updatedItem is null)
+                {
+                    inventories[0].Items.Remove(invSlot);
+                }
+                else
+                {
+                    // Add or update slot item stack
+                    inventories[0].Items[invSlot] = updatedItem;
+                }
+
+                // Starting from 1.17, the server no longer send a packet to
+                // update this dropped slot, so we do it manually here.
+                if (protocolVersion >= ProtocolMinecraft.MC_1_17_1_Version)
+                {
+                    EventManager.Instance.Broadcast(new InventorySlotUpdateEvent(0, invSlot, updatedItem, true));
+                    EventManager.Instance.Broadcast(new HotbarSlotUpdateEvent(CurrentHotbarSlot, updatedItem));
+                    EventManager.Instance.Broadcast(new HeldItemUpdateEvent(CurrentHotbarSlot, Hand.MainHand,
+                        false, updatedItem, PlayerActionHelper.GetItemActionType(updatedItem)));
+                }
+            }
+
+            return sent;
+        }
+
+        /// <summary>
+        /// Swap item stacks in main hand and off hand
+        /// </summary>
+        public override bool SwapItemOnHands()
+        {
+            return GameMode != GameMode.Spectator && handler!.SendPlayerAction(6);
+        }
+
+        /// <summary>
+        /// Change active slot in the player inventory
+        /// </summary>
+        /// <param name="slot">Slot to activate (0 to 8)</param>
+        /// <returns>TRUE if the slot was changed</returns>
+        public override bool ChangeHotbarSlot(short slot)
+        {
+            if (slot is < 0 or > 8)
+                return false;
+
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => ChangeHotbarSlot(slot));
+                return true;
+            }
+            
+            // There won't be confirmation from the server
+            // Simply set it on the client side
+            CurrentHotbarSlot = Convert.ToByte(slot);
+            var curItem = inventories[0].GetHotbarItem(slot);
+            // Broad cast hotbar selection change
+            EventManager.Instance.BroadcastOnUnityThread(
+                new HeldItemUpdateEvent(CurrentHotbarSlot, Hand.MainHand, true, curItem, PlayerActionHelper.GetItemActionType(curItem)));
+
+            return handler!.SendHeldItemChange(slot);
+        }
+
+        /// <summary>
+        /// Select villager trade
+        /// </summary>
+        /// <param name="selectedSlot">The slot of the trade, starts at 0</param>
+        public bool SelectTrade(int selectedSlot)
+        {
+            if (InvokeRequired)
+            {
+                _ = InvokeOnNetMainThreadAsync(() => SelectTrade(selectedSlot));
+                return true;
+            }
+
+            return handler!.SelectTrade(selectedSlot);
+        }
+
+        /// <summary>
+        /// Teleport to player in spectator mode
+        /// </summary>
+        /// <param name="entitySpawn">Player to teleport to</param>
+        /// Teleporting to other entities is NOT implemented yet
+        public bool Spectate(EntitySpawnData entitySpawn)
+        {
+            return entitySpawn.Type.TypeId == EntityType.PLAYER_ID && SpectateByUUID(entitySpawn.UUID);
+        }
+
+        /// <summary>
+        /// Teleport to player/entity in spectator mode
+        /// </summary>
+        /// <param name="UUID">UUID of player/entity to teleport to</param>
+        private bool SpectateByUUID(Guid UUID)
+        {
+            if (GameMode == GameMode.Spectator)
+            {
+                if (InvokeRequired)
+                {
+                    _ = InvokeOnNetMainThreadAsync(() => SpectateByUUID(UUID));
+                    return true;
+                }
+
+                return handler!.SendSpectate(UUID);
+            }
+            return false;
+        }
+        #endregion
+
+        #region Event handlers: Handle an event occurred on the server
+        /// <summary>
+        /// Called when a network packet received or sent
+        /// </summary>
+        /// <remarks>
+        /// Only called if <see cref="ProtocolSettings.CapturePackets"/> is set to True
+        /// </remarks>
+        /// <param name="packetId">Packet Id</param>
+        /// <param name="packetData">A copy of Packet Data</param>
+        /// <param name="currentState">The current game state in which the packet is handled</param>
+        /// <param name="isInbound">The packet is received from server or sent by client</param>
+        public void OnNetworkPacket(int packetId, byte[] packetData, CurrentState currentState, bool isInbound)
+        {
+            if (currentState == CurrentState.Play)
+            {
+                // Regular in-game packet
+                EventManager.Instance.BroadcastOnUnityThread(new InGamePacketEvent(isInbound, packetId, packetData));
+            }
+        }
+
+        /// <summary>
+        /// Called when a server was successfully joined
+        /// </summary>
+        public void OnGameJoined(bool isOnlineMode)
+        {
+            if (protocolVersion < ProtocolMinecraft.MC_1_19_3_Version || playerKeyPair == null || !isOnlineMode)
+                SetCanSendMessage(true);
+            else
+                SetCanSendMessage(false);
+
+            handler!.SendBrandInfo(ProtocolSettings.BrandInfo.Trim());
+
+            if (ProtocolSettings.MCSettings.Enabled)
+                handler.SendClientSettings(
+                    ProtocolSettings.MCSettings.Locale,
+                    ProtocolSettings.MCSettings.RenderDistance,
+                    ProtocolSettings.MCSettings.Difficulty,
+                    ProtocolSettings.MCSettings.ChatMode,
+                    ProtocolSettings.MCSettings.ChatColors,
+                    ProtocolSettings.MCSettings.Skin_All,
+                    ProtocolSettings.MCSettings.MainHand,
+                    ProtocolSettings.MCSettings.ParticleStatus);
+
+            if (protocolVersion >= ProtocolMinecraft.MC_1_19_3_Version
+                && playerKeyPair != null && isOnlineMode)
+                handler.SendPlayerSession(playerKeyPair);
+
+            ClearInventories();
+
+            Loom.QueueOnMainThread(() =>
+            {
+                if (!string.IsNullOrWhiteSpace(host))
+                    WindowTitleManager.SetServerTitle($"{receivedVersionName ?? ProtocolHandler.ProtocolVersion2MCVer(protocolVersion)} (v{protocolVersion}) - {host}:{port}");
+                else
+                    WindowTitleManager.SetDefaultTitle();
+            });
+        }
+
+        /// <summary>
+        /// Called when the protocol handler receives a recipe declaration
+        /// </summary>
+        /// <param name="recipeType">Recipe type</param>
+        /// <param name="recipeData">Recipe data</param>
+        public void OnDeclareRecipe(BaseRecipeType recipeType, RecipeExtraData recipeData)
+        {
+            if (receivedRecipes.TryGetValue(recipeType.TypeId, out var recipeDataList))
+            {
+                recipeDataList.Add(recipeData);
+            }
+            else
+            {
+                receivedRecipes.Add(recipeType.TypeId, new List<RecipeExtraData> { recipeData });
+            }
+        }
+
+        /// <summary>
+        /// Called when render distance is set
+        /// </summary>
+        /// <param name="dist">New render distance (2-32)</param>
+        public void OnViewDistance(int dist)
+        {
+            // Use the lower value of client and server view distance
+            RenderDistance = Mathf.Min(dist, ProtocolSettings.MCSettings.RenderDistance);
+        }
+
+        /// <summary>
+        /// Called when a block action is triggered
+        /// <br/>
+        /// See https://minecraft.wiki/w/Java_Edition_protocol/Block_actions
+        /// </summary>
+        /// <param name="blockLoc">Block location</param>
+        /// <param name="actionId">Action id</param>
+        /// <param name="actionParam">Action parameter</param>
+        public void OnBlockAction(BlockLoc blockLoc, byte actionId, byte actionParam)
+        {
+            EventManager.Instance.BroadcastOnUnityThread(new BlockActionEvent(blockLoc, actionId, actionParam));
+        }
+
+        /// <summary>
+        /// Called when the player respawns, which happens on login, respawn and world change.
+        /// </summary>
+        public void OnRespawn()
+        {
+            // Reset location received flag
+            locationReceived = false;
+
+            ClearTasks();
+
+            // Clear world data
+            ChunkRenderManager.ClearChunksData();
+
+            //if (!keepAttr)
+            {
+                ClearInventories();
+            }
+
+            Loom.QueueOnMainThread(() =>
+            {
+                ScreenControl.SetLoadingScreen(true);
+                PlayerController.DisablePhysics();
+
+                ChunkRenderManager.ReloadChunksRender();
+                EntityRenderManager.ReloadEntityRenders();
+            });
+        }
+
+        /// <summary>
+        /// Called when the server sends a new player location.
+        /// </summary>
+        /// <param name="location">The new location</param>
+        /// <param name="lookAtLocation">Block coordinates to look at</param>
+        public void UpdateLocation(Location location, Location lookAtLocation)
+        {
+            var dx = lookAtLocation.X - (location.X - 0.5);
+            var dy = lookAtLocation.Y - (location.Y + 1);
+            var dz = lookAtLocation.Z - (location.Z - 0.5);
+
+            var r = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+
+            var yaw = Convert.ToSingle(-Math.Atan2(dx, dz) / Math.PI * 180);
+            var pitch = Convert.ToSingle(-Math.Asin(dy / r) / Math.PI * 180);
+            if (yaw < 0) yaw += 360;
+
+            UpdateLocation(location, yaw, pitch);
+        }
+
+        /// <summary>
+        /// Called when the server sends a new player location.
+        /// </summary>
+        /// <param name="location">The new location</param>
+        /// <param name="yaw">Yaw to look at</param>
+        /// <param name="pitch">Pitch to look at</param>
+        public void UpdateLocation(Location location, float yaw, float pitch)
+        {
+            lock (movementLock)
+            {
+                if (!locationReceived) // On entering world or respawning
+                {
+                    locationReceived = true;
+
+                    Loom.QueueOnMainThread(() =>
+                    {
+                        // Update player location
+                        PlayerController.SetLocationFromServer(location, mcYaw: yaw);
+                        var playerBlockLoc = location.GetBlockLoc();
+                        // Force refresh environment collider
+                        ChunkRenderManager.InitializeBoxTerrainCollider(playerBlockLoc, () =>
+                        {
+                            // Pop loading screen
+                            ScreenControl.SetLoadingScreen(false);
+                            PlayerController.EnablePhysics();
+                        });
+                        // Update nearby chunk coordinate list
+                        ChunkRenderManager.UpdateNearbyChunkCoordList(playerBlockLoc.GetChunkX(), playerBlockLoc.GetChunkZ());
+                        // Update camera yaw (convert to Unity yaw)
+                        CameraController.SetYaw(yaw + 90F);
+                    });
+                }
+                else // Position correction from server
+                {                    
+                    Loom.QueueOnMainThread(() =>
+                    {
+                        var delta = PlayerController.transform.position - CoordConvert.MC2Unity(WorldOriginOffset, location);
+                        /*
+                        if (delta.magnitude < 8F)
+                        {
+                            return; // I don't like this packet.
+                        }
+                        */
+                        var playerBlockLoc = location.GetBlockLoc();
+                        // Force refresh environment collider
+                        ChunkRenderManager.RebuildTerrainBoxCollider(playerBlockLoc);
+                        // Update nearby chunk coordinate list
+                        ChunkRenderManager.UpdateNearbyChunkCoordList(playerBlockLoc.GetChunkX(), playerBlockLoc.GetChunkZ());
+                        // Then update player location
+                        PlayerController.SetLocationFromServer(location, reset: true, mcYaw: yaw);
+                        //Debug.Log($"Updated to {location} offset: {offset.magnitude}");
+                    });
+                }
+            }
+        }
+
+        /// <summary>
+        /// Called when received chat/system message from the server
+        /// </summary>
+        /// <param name="message">Message received</param>
+        public void OnTextReceived(ChatMessage message)
+        {
+            UpdateKeepAlive();
+
+            List<(string, string, string, string)> actions = new();
+            string messageText;
+
+            // Used for 1.19+ to mark: system message, legal / illegal signature
+            var signaturePrefix = string.Empty;
+
+            if (message.isSignedChat)
+            {
+                if (!ProtocolSettings.ShowIllegalSignedChat && !message.isSystemChat && !(bool)message.isSignatureLegal!)
+                    return;
+                messageText = ChatParser.ParseSignedChat(message, actions);
+
+                if (message.isSystemChat)
+                {
+                    if (ProtocolSettings.MarkSystemMessage)
+                        signaturePrefix = "§7▌§r";     // Background Gray
+                }
+                else
+                {
+                    if ((bool) message.isSignatureLegal!)
+                    {
+                        if (ProtocolSettings.ShowModifiedChat && message.unsignedContent != null)
+                        {
+                            if (ProtocolSettings.MarkModifiedMsg)
+                                signaturePrefix = "§6▌§r"; // Background Yellow
+                        }
+                        else
+                        {
+                            if (ProtocolSettings.MarkLegallySignedMsg)
+                                signaturePrefix = "§2▌§r"; // Background Green
+                        }
+                    }
+                    else
+                    {
+                        if (ProtocolSettings.MarkIllegallySignedMsg)
+                            signaturePrefix = "§4▌§r"; // Background Red
+                    }
+                }
+            }
+            else
+            {
+                messageText = message.isJson ? ChatParser.ParseText(message.content, actions) : message.content;
+            }
+
+            EventManager.Instance.BroadcastOnUnityThread<ChatMessageEvent>(new(signaturePrefix + messageText, actions.ToArray()));
+        }
+
+        /// <summary>
+        /// Called when received a connection keep-alive from the server
+        /// </summary>
+        public void OnServerKeepAlive()
+        {
+            UpdateKeepAlive();
+        }
+
+        /// <summary>
+        /// Called when tab complete suggestion is received
+        /// </summary>
+        public void OnTabCompleteDone(int completionStart, int completionLength, string[] completeResults)
+        {
+            if (completeResults.Length > 0)
+            {
+                EventManager.Instance.BroadcastOnUnityThread<AutoCompletionEvent>(
+                        new(completionStart, completionLength, completeResults));
+            }
+            else
+            {
+                EventManager.Instance.BroadcastOnUnityThread(AutoCompletionEvent.EMPTY);
+            }
+        }
+
+        /// <summary>
+        /// Called when an inventory is opened
+        /// </summary>
+        /// <param name="inventoryData">The inventory</param>
+        /// <param name="inventoryId">Inventory Id</param>
+        public void OnInventoryOpen(int inventoryId, InventoryData inventoryData)
+        {
+            activeInventoryId = inventoryId;
+            inventories[inventoryId] = inventoryData;
+
+            Loom.QueueOnMainThread(() =>
+            {
+                // Set inventory id before opening the screen
+                ScreenControl.SetScreenData<InventoryScreen>(screen =>
+                {
+                    screen.SetActiveInventory(inventoryData);
+                });
+                ScreenControl.PushScreen<InventoryScreen>();
+
+                EventManager.Instance.Broadcast(new InventoryOpenEvent(inventoryId, inventoryData));
+            });
+        }
+
+        /// <summary>
+        /// Called when an inventory is closed
+        /// </summary>
+        /// <param name="inventoryId">Inventory Id</param>
+        public void OnInventoryClose(int inventoryId)
+        {
+            if (activeInventoryId != inventoryId)
+            {
+                Debug.LogWarning($"Trying to close inventory [{inventoryId}] while active inventory is [{activeInventoryId}]!");
+            }
+            activeInventoryId = -1;
+            
+            if (inventories.ContainsKey(inventoryId))
+            {
+                if (inventoryId == 0)
+                    inventories[0].Items.Clear(); // Don't delete player inventory
+                else
+                    inventories.Remove(inventoryId);
+            }
+
+            if (inventoryId != 0)
+            {
+                Debug.Log(Translations.Get("extra.inventory_close", inventoryId));
+            }
+
+            EventManager.Instance.BroadcastOnUnityThread(new InventoryCloseEvent(inventoryId));
+        }
+
+        /// <summary>
+        /// When received inventory property from server.
+        /// Used for Furnaces, Enchanting Table, Beacon, Brewing stand, Stone cutter, Loom and Lectern
+        /// More info about: https://wiki.vg/Protocol#Set_Inventory_Property
+        /// </summary>
+        /// <param name="inventoryId">Inventory Id</param>
+        /// <param name="propertyId">Property Id</param>
+        /// <param name="propertyValue">Property Value</param>
+        public void OnInventoryProperty(int inventoryId, short propertyId, short propertyValue)
+        {
+            if (!inventories.TryGetValue(inventoryId, out var inventory))
+                return;
+
+            inventory.Properties[propertyId] = propertyValue;
+
+            Loom.QueueOnMainThread(() =>
+            {
+                EventManager.Instance.Broadcast(new InventoryPropertyUpdateEvent(inventoryId, propertyId, propertyValue));
+            });
+        }
+
+        /// <summary>
+        /// When received inventory items from server
+        /// </summary>
+        /// <param name="inventoryId">Inventory Id</param>
+        /// <param name="itemList">Item list, key = slot Id, value = Item information</param>
+        /// <param name="stateId">State Id of inventory</param>
+        public void OnInventoryItems(int inventoryId, Dictionary<int, ItemStack?> itemList, int stateId)
+        {
+            if (inventories.TryGetValue(inventoryId, out var inventory))
+            {
+                //Debug.Log($"Slots: [{inventoryId}] [{string.Join(", ", inventory.Items.Keys)}] -> [{string.Join(", ", itemList.Keys)}]");
+                foreach (var (slot, itemStack) in itemList)
+                {
+                    if (itemStack is null)
+                        inventory.Items.Remove(slot);
+                    else
+                        inventory.Items[slot] = itemStack;
+                }
+
+                inventory.StateId = Mathf.Max(inventory.StateId, stateId);
+                //var slotsText = string.Join(", ", itemList.Select(x => $"[{x.Key}] {x.Value}"));
+                //Debug.Log($"[OnInventoryItems] Set inventory [{inventoryId}] items. State id set to {stateId}. Slots: {slotsText}");
+                
+                Loom.QueueOnMainThread(() =>
+                {
+                    EventManager.Instance.Broadcast(new InventoryItemsUpdateEvent(inventoryId, itemList));
+
+                    foreach (var (slot, itemStack) in itemList)
+                    {
+                        if (inventory.IsHotbar(slot, out var hotbarSlot))
+                        {
+                            EventManager.Instance.Broadcast(new HotbarSlotUpdateEvent(hotbarSlot, itemStack));
+                            if (hotbarSlot == CurrentHotbarSlot) // Updating held item
+                            {
+                                EventManager.Instance.Broadcast(new HeldItemUpdateEvent(CurrentHotbarSlot, Hand.MainHand,
+                                    false, itemStack, PlayerActionHelper.GetItemActionType(itemStack)));
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        /// <summary>
+        /// Called when a single slot has been updated inside an inventory
+        /// </summary>
+        /// <param name="inventoryId">Inventory Id</param>
+        /// <param name="slot">Item slot</param>
+        /// <param name="item">Item (may be null for empty slot)</param>
+        /// <param name="stateId">State Id</param>
+        /// <param name="fromClient">Whether this is sent from client</param>
+        public void OnInventorySlot(int inventoryId, short slot, ItemStack? item, int stateId, bool fromClient)
+        {
+            if (inventories.TryGetValue(inventoryId, out var inventory))
+            {
+                inventory.StateId = Mathf.Max(inventory.StateId, stateId);
+            }
+
+            if (dragging) return;
+            
+            // Handle inventoryId -2 - Add item to player inventory without animation. State id should be ignored
+            if (inventoryId == 254)
+            {
+                inventoryId = 0;
+                if (slot < 9) // Hotbar slots
+                {
+                    slot += 36; // Map 0-8 to 36-44
+                }
+            }
+
+            if (inventoryId == 255 && slot == -1) // Handle cursor item
+            {
+                if (inventories.ContainsKey(0))
+                {
+                    if (item != null)
+                        inventories[0].Items[-1] = item;
+                    else
+                        inventories[0].Items.Remove(-1);
+                    
+                    EventManager.Instance.BroadcastOnUnityThread(new InventorySlotUpdateEvent(0, -1, item, fromClient));
+                }
+            }
+            else
+            {
+                if (inventories.TryGetValue(inventoryId, out var inventory2))
+                {
+                    if (item == null || item.IsEmpty)
+                    {
+                        inventory2.Items.Remove(slot);
+                    }
+                    else
+                    {
+                        inventory2.Items[slot] = item;
+                    }
+
+                    Loom.QueueOnMainThread(() =>
+                    {
+                        EventManager.Instance.Broadcast(new InventorySlotUpdateEvent(inventoryId, slot, item, fromClient));
+
+                        if (inventory2.IsHotbar(slot, out var hotbarSlot))
+                        {
+                            EventManager.Instance.Broadcast(new HotbarSlotUpdateEvent(hotbarSlot, item));
+                            if (hotbarSlot == CurrentHotbarSlot) // Updating held item
+                            {
+                                EventManager.Instance.Broadcast(new HeldItemUpdateEvent(CurrentHotbarSlot, Hand.MainHand,
+                                    false, item, PlayerActionHelper.GetItemActionType(item)));
+                            }
+                        }
+                    });
+                }
+                else
+                {
+                    Debug.LogWarning($"Inventory [{inventoryId}] is not available!");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Called when an inventory is opened
+        /// </summary>
+        /// <param name="blockLoc">Location of the sign block</param>
+        /// <param name="isFrontText">Edit front text (1.21+)</param>
+        public void OnSignEditorOpen(BlockLoc blockLoc, bool isFrontText)
+        {
+            Loom.QueueOnMainThread(() =>
+            {
+                // Set inventory id before opening the screen
+                ScreenControl.SetScreenData<SignEditorScreen>(screen =>
+                {
+                    screen.SetSignInfo(blockLoc, isFrontText);
+                });
+                ScreenControl.PushScreen<SignEditorScreen>();
+            });
+        }
+        
+        /// <summary>
+        /// Set client player's Id for later receiving player's own properties
+        /// </summary>
+        /// <param name="entityId">Player Entity Id</param>
+        public void OnReceivePlayerEntityId(int entityId)
+        {
+            _clientEntitySpawn.Id = entityId;
+            Debug.Log($"Player entity Id received: {entityId}");
+        }
+
+        /// <summary>
+        /// Triggered when a new player joins the game
+        /// </summary>
+        /// <param name="player">player info</param>
+        public void OnPlayerJoin(PlayerInfo player)
+        {
+            //Ignore placeholders eg 0000tab# from TabListPlus
+            if (!PlayerInfo.IsValidName(player.Name))
+                return;
+
+            if (player.Name == username)
+            {
+                // 1.19+ offline server is possible to return different uuid
+                // This will disable custom skin for client player
+                uuid = player.UUID;
+                // Also update client entity uuid
+                _clientEntitySpawn.UUID = uuid;
+                Debug.Log($"Updated client uuid: {uuid}");
+            }
+
+            lock (onlinePlayers)
+            {
+                onlinePlayers[player.UUID] = player;
+            }
+        }
+
+        /// <summary>
+        /// Triggered when a player has left the game
+        /// </summary>
+        /// <param name="playerUUID">UUID of the player</param>
+        public void OnPlayerLeave(Guid playerUUID)
+        {
+            lock (onlinePlayers)
+            {
+                onlinePlayers.Remove(playerUUID);
+            }
+        }
+
+        /// <summary>
+        /// Called when a player has been killed by another entity
+        /// </summary>
+        /// <param name="killerEntityId">Killer's entity id</param>
+        /// <param name="chatMessage">message sent in chat when player is killed</param>
+        public void OnPlayerKilled(int killerEntityId, string chatMessage)
+        {
+
+        }
+
+        /// <summary>
+        /// Called when an entity spawned
+        /// </summary>
+        public void OnSpawnEntity(EntitySpawnData entitySpawn)
+        {
+            Loom.QueueOnMainThread(() =>
+            {
+                EntityRenderManager.AddEntityRender(entitySpawn);
+            });
+        }
+
+        /// <summary>
+        /// Called when an entity acquires an effect
+        /// </summary>
+        /// <param name="entityId">Entity Id</param>
+        /// <param name="effectId">Effect Id</param>
+        /// <param name="amplifier">Effect amplifier</param>
+        /// <param name="duration">Effect duration</param>
+        /// <param name="flags">Effect flags</param>
+        /// <param name="hasFactorData">Has factor data</param>
+        /// <param name="factorCodec">FactorCodec</param>
+        public void OnEntityEffect(int entityId, int effectId, int amplifier, int duration, byte flags,
+            bool hasFactorData, Dictionary<string, object>? factorCodec)
+        {
+            if (entityId == _clientEntitySpawn.Id)
+            {
+                var isAmbient = (flags & 0x01) != 0;
+                var showParticle = (flags & 0x02) != 0;
+                var showIcon = (flags & 0x04) != 0;
+
+                var effectInstance = new MobEffectInstance(MobEffectPalette.INSTANCE.GetIdByNumId(effectId),
+                    amplifier, duration, isAmbient, showParticle, showIcon);
+                
+                EventManager.Instance.BroadcastOnUnityThread(new MobEffectUpdateEvent(effectInstance));
+            }
+        }
+        
+        /// <summary>
+        /// Called when an entity removes an effect
+        /// </summary>
+        /// <param name="entityId">Entity Id</param>
+        /// <param name="effectId">Effect Id</param>
+        public void OnRemoveEntityEffect(int entityId, int effectId)
+        {
+            if (entityId == _clientEntitySpawn.Id)
+            {
+                EventManager.Instance.BroadcastOnUnityThread(new MobEffectRemovalEvent(effectId));
+            }
+        }
+
+        /// <summary>
+        /// Called when a player spawns or enters the client's render distance
+        /// </summary>
+        public void OnSpawnPlayer(int entityId, Guid playerUUID, Location location, byte Yaw, byte Pitch)
+        {
+            string? playerName = null;
+            lock (onlinePlayers)
+            {
+                if (onlinePlayers.TryGetValue(playerUUID, out var player))
+                    playerName = player.Name;
+            }
+            EntitySpawnData playerEntitySpawn = new(entityId, EntityTypePalette.INSTANCE.GetById(EntityType.PLAYER_ID), location, playerUUID, playerName);
+            OnSpawnEntity(playerEntitySpawn);
+        }
+
+        /// <summary>
+        /// Called on Entity Equipment
+        /// </summary>
+        /// <param name="entityId">Entity Id</param>
+        /// <param name="slot">Equipment slot. 0: main hand, 1: off hand, 2–5: armor slot (2: boots, 3: leggings, 4: chestplate, 5: helmet)</param>
+        /// <param name="item">Item</param>
+        public void OnEntityEquipment(int entityId, int slot, ItemStack item)
+        {
+            // TODO
+        }
+
+        /// <summary>
+        /// Called when the Game Mode has been updated for a player
+        /// </summary>
+        /// <param name="playerUUID">Player UUID (Empty for initial gamemode on login)</param>
+        /// <param name="gamemode">New Game Mode (0: Survival, 1: Creative, 2: Adventure, 3: Spectator).</param>
+        public void OnGamemodeUpdate(Guid playerUUID, int gamemode)
+        {
+            if (playerUUID == Guid.Empty) // Initial gamemode on login
+            {
+                Loom.QueueOnMainThread(() =>
+                {
+                    GameMode = (GameMode) gamemode;
+                    EventManager.Instance.Broadcast<GameModeUpdateEvent>(new(GameMode));
+                });
+            }
+            else
+            {
+                lock (onlinePlayers)
+                {
+                    if (onlinePlayers.TryGetValue(playerUUID, out var player)) // Further regular gamemode change events
+                    {
+                        var playerName = player.Name;
+                        if (playerName == username)
+                        {
+                            Loom.QueueOnMainThread(() =>
+                            {
+                                GameMode = (GameMode) gamemode;
+                                EventManager.Instance.Broadcast<GameModeUpdateEvent>(new(GameMode));
+
+                                CornApp.Notify(Translations.Get("gameplay.control.update_gamemode",
+                                    ChatParser.TranslateString($"gameMode.{GameMode.GetIdentifier()}")), Notification.Type.Success);
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Called when entities dead/despawn.
+        /// </summary>
+        public void OnDestroyEntities(int[] entities)
+        {
+            Loom.QueueOnMainThread(() =>
+            {
+                EntityRenderManager.RemoveEntityRenders(entities);
+            });
+        }
+
+        /// <summary>
+        /// Called when an entity's position changed within 8 block of its previous position.
+        /// </summary>
+        /// <param name="entityId">Entity Id</param>
+        /// <param name="dx">X offset</param>
+        /// <param name="dy">Y offset</param>
+        /// <param name="dz">Z offset</param>
+        /// <param name="onGround">Whether the entity is grounded</param>
+        public void OnEntityPosition(int entityId, double dx, double dy, double dz, bool onGround)
+        {
+            Loom.QueueOnMainThread(() =>
+            {
+                EntityRenderManager.MoveEntityRender(entityId, new(dx, dy, dz));
+            });
+        }
+
+        /// <summary>
+        /// Called when an entity's yaw/pitch changed.
+        /// </summary>
+        /// <param name="entityId">Entity Id</param>
+        /// <param name="yaw">New yaw</param>
+        /// <param name="pitch">New pitch</param>
+        /// <param name="onGround">Whether the entity is grounded</param>
+        public void OnEntityRotation(int entityId, byte yaw, byte pitch, bool onGround)
+        {
+            Loom.QueueOnMainThread(() =>
+            {
+                EntityRenderManager.RotateEntityRender(entityId, yaw, pitch);
+            });
+        }
+
+        /// <summary>
+        /// Called when an entity's head yaw changed.
+        /// </summary>
+        /// <param name="entityId">Entity Id</param>
+        /// <param name="headYaw">New head yaw</param>
+        public void OnEntityHeadLook(int entityId, byte headYaw)
+        {
+            Loom.QueueOnMainThread(() =>
+            {
+                EntityRenderManager.RotateEntityRenderHead(entityId, headYaw);
+            });
+        }
+
+        /// <summary>
+        /// Called when an entity's velocity changed.
+        /// </summary>
+        /// <param name="entityId">Entity Id</param>
+        /// <param name="vx">New x velocity</param>
+        /// <param name="vy">New y velocity</param>
+        /// <param name="vz">New z velocity</param>
+        public void OnEntityVelocity(int entityId, double vx, double vy, double vz)
+        {
+            Loom.QueueOnMainThread(() =>
+            {
+                EntityRenderManager.SetEntityReceivedVelocity(entityId, new float3((float) vx, (float) vy, (float) vz));
+            });
+        }
+
+        public void OnEntityTeleport(int entityId, double X, double Y, double Z, bool onGround)
+        {
+            Loom.QueueOnMainThread(() =>
+            {
+                EntityRenderManager.TeleportEntityRender(entityId, new Location(X, Y, Z));
+            });
+        }
+
+        /// <summary>
+        /// Called when additional properties have been received for an entity
+        /// </summary>
+        /// <param name="entityId">Entity Id</param>
+        /// <param name="props">Dictionary of properties</param>
+        public void OnEntityProperties(int entityId, Dictionary<ResourceLocation, double> props) { }
+
+        /// <summary>
+        /// Called when the status of an entity have been changed
+        /// </summary>
+        /// <param name="entityId">Entity Id</param>
+        /// <param name="status">Status Id</param>
+        public void OnEntityStatus(int entityId, byte status) { }
+
+        /// <summary>
+        /// Called when server sent a Time Update packet.
+        /// </summary>
+        /// <param name="worldAge"></param>
+        /// <param name="timeOfDay"></param>
+        public void OnTimeUpdate(long worldAge, long timeOfDay)
+        {
+            // TimeUpdate sent every server tick hence used as timeout detect
+            UpdateKeepAlive();
+
+            Loom.QueueOnMainThread(() =>
+            {
+                EnvironmentManager.SetTime(timeOfDay);
+            });
+
+            // calculate server tps
+            if (lastAge != 0)
+            {
+                var currentTime = DateTime.Now;
+                var tickDiff = worldAge - lastAge;
+                var tps = tickDiff / (currentTime - lastTime).TotalSeconds;
+                lastAge = worldAge;
+                lastTime = currentTime;
+                if (tps is <= 20 and > 0)
+                {
+                    // calculate average tps
+                    if (tpsSamples.Count >= maxSamples)
+                    {
+                        // full
+                        sampleSum -= tpsSamples[0];
+                        tpsSamples.RemoveAt(0);
+                    }
+                    tpsSamples.Add(tps);
+                    sampleSum += tps;
+                    averageTPS = sampleSum / tpsSamples.Count;
+                    serverTPS = tps;
+                }
+                EventManager.Instance.BroadcastOnUnityThread(new TickSyncEvent((int) tickDiff));
+            }
+            else
+            {
+                lastAge = worldAge;
+                lastTime = DateTime.Now;
+            }
+        }
+
+        /// <summary>
+        /// Called when client player's health changed, e.g. getting attacked
+        /// </summary>
+        /// <param name="health">Player current health</param>
+        /// <param name="hunger">Player current hunger</param>
+        /// <param name="saturation">Player current saturation</param>
+        public void OnUpdateHealth(float health, int hunger, float saturation)
+        {
+            var updateMaxHealth = maximumHealth < health;
+
+            if (updateMaxHealth)
+                maximumHealth = health;
+            
+            currentHealth = health;
+            currentHunger = hunger;
+            currentSaturation = saturation;
+
+            EventManager.Instance.BroadcastOnUnityThread(new HealthUpdateEvent(health, updateMaxHealth));
+            
+            EventManager.Instance.BroadcastOnUnityThread(new HungerUpdateEvent(hunger, saturation));
+        }
+
+        /// <summary>
+        /// Called when experience is updated
+        /// </summary>
+        /// <param name="expBar">Between 0 and 1</param>
+        /// <param name="expLevel">Experience level</param>
+        /// <param name="totalExp">Total experience</param>
+        public void OnSetExperience(float expBar, int expLevel, int totalExp)
+        {
+            experienceLevel = expLevel;
+            totalExperience = totalExp;
+            
+            EventManager.Instance.BroadcastOnUnityThread(new ExperienceUpdateEvent(expLevel, totalExp, expBar));
+        }
+
+        /// <summary>
+        /// Called when an explosion occurs on the server
+        /// </summary>
+        /// <param name="location">Explosion location</param>
+        /// <param name="strength">Explosion strength</param>
+        /// <param name="affectedBlocks">Amount of affected blocks</param>
+        public void OnExplosion(Location location, float strength, int affectedBlocks) { }
+
+        /// <summary>
+        /// Called when Latency is updated
+        /// </summary>
+        /// <param name="playerUUID">player uuid</param>
+        /// <param name="latency">Latency</param>
+        public void OnLatencyUpdate(Guid playerUUID, int latency)
+        {
+            lock (onlinePlayers)
+            {
+                if (onlinePlayers.TryGetValue(playerUUID, out var player))
+                {
+                    player.Ping = latency;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Called when held item is changed
+        /// </summary>
+        /// <param name="slot">Selected hotbar slot</param>
+        public void OnHeldItemChange(byte slot) //
+        {
+            CurrentHotbarSlot = slot;
+            var newItem = inventories[0].GetHotbarItem(slot);
+            // Broadcast hotbar selection change
+            EventManager.Instance.BroadcastOnUnityThread(
+                new HeldItemUpdateEvent(CurrentHotbarSlot, Hand.MainHand, true, newItem,
+                    PlayerActionHelper.GetItemActionType(newItem)));
+        }
+
+        /// <summary>
+        /// Called when an update of the map is sent by the server, take a look at https://wiki.vg/Protocol#Map_Data for more info on the fields
+        /// Map format and colors: https://minecraft.fandom.com/wiki/Map_item_format
+        /// </summary>
+        /// <param name="mapId">Map Id of the map being modified</param>
+        /// <param name="scale">A scale of the Map, from 0 for a fully zoomed-in map (1 block per pixel) to 4 for a fully zoomed-out map (16 blocks per pixel)</param>
+        /// <param name="trackingPosition">Specifies whether player and item frame icons are shown </param>
+        /// <param name="locked">True if the map has been locked in a cartography table </param>
+        /// <param name="icons">A list of MapIcon objects of map icons, send only if trackingPosition is true</param>
+        /// <param name="colsUpdated">Numbs of columns that were updated (map width) (NOTE: If it is 0, the next fields are not used/are set to default values of 0 and null respectively)</param>
+        /// <param name="rowsUpdated">Map height</param>
+        /// <param name="mapColX">x offset of the westernmost column</param>
+        /// <param name="mapRowZ">z offset of the northernmost row</param>
+        /// <param name="colors">a byte array of colors on the map</param>
+        public void OnMapData(int mapId, byte scale, bool trackingPosition, bool locked, List<MapIcon> icons, byte colsUpdated, byte rowsUpdated, byte mapColX, byte mapRowZ, byte[]? colors) { }
+
+        /// <summary>
+        /// Received some Title from the server
+        /// <param name="action"> 0 = set title, 1 = set subtitle, 3 = set action bar, 4 = set times and display, 4 = hide, 5 = reset</param>
+        /// <param name="titleText"> title text</param>
+        /// <param name="subtitleText"> subtitle text</param>
+        /// <param name="actionbarText"> action bar text</param>
+        /// <param name="fadeIn"> Fade In</param>
+        /// <param name="stay"> Stay</param>
+        /// <param name="fadeOut"> Fade Out</param>
+        /// <param name="json"> json text</param>
+        /// </summary>
+        public void OnTitle(int action, string titleText, string subtitleText, string actionbarText, int fadeIn, int stay, int fadeOut, string json) { }
+
+        /// <summary>
+        /// Called when ScoreboardObjective is updated
+        /// </summary>
+        /// <param name="objectiveName">objective name</param>
+        /// <param name="mode">0 to create the scoreboard. 1 to remove the scoreboard. 2 to update the display text.</param>
+        /// <param name="objectiveValue">Only if mode is 0 or 2. The text to be displayed for the score</param>
+        /// <param name="type">Only if mode is 0 or 2. 0 = "integer", 1 = "hearts".</param>
+        public void OnScoreboardObjective(string objectiveName, byte mode, string objectiveValue, int type)
+        {
+            //string json = objectiveValue;
+            //objectiveValue = ChatParser.ParseText(objectiveValue);
+        }
+
+        /// <summary>
+        /// Called when DisplayScoreboard is updated
+        /// </summary>
+        /// <param name="entityName">The entity whose score this is. For players, this is their username; for other entities, it is their UUID.</param>
+        /// <param name="action">0 to create/update an item. 1 to remove an item.</param>
+        /// <param name="objectiveName">The name of the objective the score belongs to</param>
+        /// <param name="objectiveDisplayName">The name of the objective the score belongs to, but with chat formatting</param>
+        /// <param name="objectiveValue">The score to be displayed next to the entry. Only sent when Action does not equal 1.</param>
+        /// <param name="numberFormat">Number format: 0 - blank, 1 - styled, 2 - fixed</param>
+        public void OnUpdateScore(string entityName, int action, string objectiveName, string objectiveDisplayName, int objectiveValue, int numberFormat)
+        {
+
+        }
+
+        /// <summary>
+        /// Called when the metadata of an entity changed is received
+        /// </summary>
+        /// <param name="entityId">Entity Id</param>
+        /// <param name="metadata">The metadata of the entity</param>
+        public void OnEntityMetadata(int entityId, Dictionary<int, object?> metadata)
+        {
+            Loom.QueueOnMainThread(() =>
+            {
+                // If updating client entity's metadata, map this to our internal entity id
+                if (entityId == _clientEntitySpawn.Id)
+                {
+                    entityId = CLIENT_ENTITY_ID_INTERNAL;
+                }
+                
+                var entity = EntityRenderManager.GetEntityRender(entityId);
+
+                if (entity)
+                {
+                    entity.UpdateMetadata(metadata);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Called when tradeList is received after interacting with villager
+        /// </summary>
+        /// <param name="inventoryId">Inventory Id</param>
+        /// <param name="trades">List of trades</param>
+        /// <param name="villagerInfo">Contains Level, Experience, IsRegularVillager and CanRestock</param>
+        public void OnTradeList(int inventoryId, List<VillagerTrade> trades, VillagerInfo villagerInfo) { }
+
+        /// <summary>
+        /// Called when another player break block in gamemode 0
+        /// </summary>
+        /// <param name="entityId">Player Id</param>
+        /// <param name="blockLoc">Block location</param>
+        /// <param name="stage">Destroy stage, maximum 255</param>
+        public void OnBlockBreakAnimation(int entityId, BlockLoc blockLoc, byte stage)
+        {
+            /*
+            var block = ChunkRenderManager.GetBlock(blockLoc);
+            var status = stage < 9 ? DiggingStatus.Started : DiggingStatus.Finished;
+            */
+        }
+
+        /// <summary>
+        /// Called when animation of breaking and placing block is played
+        /// </summary>
+        /// <param name="entityId">Player Id</param>
+        /// <param name="entityAnimation">0 = LMB, 1 = RMB (RMB Currently not working)</param>
+        public void OnEntityAnimation(int entityId, byte entityAnimation)
+        {
+            // TODO
+        }
+
+        /// <summary>
+        /// Called when rain(snow) starts or stops
+        /// </summary>
+        /// <param name="begin">true if the rain is starting</param>
+        public void OnRainChange(bool begin)
+        {
+            Loom.QueueOnMainThread(() =>
+            {
+                EnvironmentManager.SetRain(begin);
+            });
+        }
+
+        /// <summary>
+        /// Called when a Synchronization sequence is received, this sequence need to be sent when breaking or placing blocks
+        /// </summary>
+        /// <param name="newSequenceId">Sequence Id</param>
+        public void OnBlockChangeAck(int newSequenceId)
+        {
+            sequenceId = newSequenceId;
+        }
+
+        /// <summary>
+        /// Called when the protocol handler receives server data
+        /// </summary>
+        /// <param name="hasMotd">Indicates if the server has a MOTD message</param>
+        /// <param name="motd">Server MOTD message</param>
+        /// <param name="hasIcon">Indicates if the server has a an icon</param>
+        /// <param name="iconBase64">Server icon in Base 64 format</param>
+        /// <param name="previewsChat">Indicates if the server previews chat</param>
+        public void OnServerDataReceived(bool hasMotd, string motd, bool hasIcon, string iconBase64, bool previewsChat) { }
+
+        /// <summary>
+        /// Called when the protocol handler receives "Set Display Chat Preview" packet
+        /// </summary>
+        /// <param name="previewsChat">Indicates if the server previews chat</param>
+        public void OnChatPreviewSettingUpdate(bool previewsChat) { }
+
+        /// <summary>
+        /// Called when the protocol handler receives "Login Success" packet
+        /// </summary>
+        /// <param name="playerUUID">The player's UUID received from the server</param>
+        /// <param name="userName">The player's DUMMY_USERNAME received from the server</param>
+        /// <param name="playerProperty">Tuple(Name, Value, Signature(empty if there is no signature))</param>
+        public void OnLoginSuccess(Guid playerUUID, string userName, Tuple<string, string, string>[]? playerProperty) { }
+
+        #endregion
+    }
+}
